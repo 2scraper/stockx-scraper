@@ -42,8 +42,12 @@ jobs:
       - name: No committed credentials
         run: |
           set +e
+          # smoke_test.py deliberately contains fake-credential-SHAPED fixtures
+          # (e.g. api_key="realTOPSECRETkey123") to test the masking/redaction
+          # logic itself — excluded alongside .env.example, not a loosening of
+          # the check against real leaks.
           MATCHES=$(grep -rnE "(api[_-]?key|TWOCAPTCHA_KEY|STOCKX_PROXY)\s*=\s*['\"][A-Za-z0-9]{10,}" \
-            --include="*.py" --include="*.md" --include="*.env*" . | grep -v ".env.example")
+            --include="*.py" --include="*.md" --include="*.env*" . | grep -vE "\.env\.example|smoke_test\.py")
           set -e
           if [ -n "$MATCHES" ]; then
             echo "$MATCHES"
