@@ -1,0 +1,98 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "17 6 * * *"   # once daily; avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    # secrets.* is not readable in a job-level `if`, so presence is tested
+    # through a job-level env var instead and read in each step's `if`
+    # (CLAUDE.md §11). Live-verified 2026-09-14 (see README "Known
+    # limitations"): a plain direct connection AND
+    # a residential --proxy exit both got the SAME fast Cloudflare WAF 403
+    # from this site — only a --cdp-endpoint session (2Captcha's Scraping
+    # Browser API, its own managed browser) has ever gotten past it. A
+    # GitHub-hosted runner has no reason to fare better than the direct
+    # connection already tested, so running this canary WITHOUT that
+    # secret would not be a canary — it would be a check that is always
+    # red, which teaches everyone to ignore checks (§11's own warning).
+    env:
+      HAS_STOCKX_CDP: ${{ secrets.STOCKX_CDP_ENDPOINT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip — no STOCKX_CDP_ENDPOINT secret configured
+        if: env.HAS_STOCKX_CDP != 'true'
+        run: |
+          echo "::notice::Skipping the live run: no STOCKX_CDP_ENDPOINT secret is set. \
+          A plain connection and a residential proxy both get the same Cloudflare \
+          block on this site (see README); only the Scraping Browser API \
+          (--cdp-endpoint) has gotten through in live testing. Set the \
+          STOCKX_CDP_ENDPOINT repo secret to a ws://...@cb.2captcha.com:9222 \
+          endpoint (reuse one pid- profile — see CLAUDE.md §12) to turn this \
+          canary on. This is a SKIP, not a pass or a fail."
+
+      - uses: actions/setup-python@v5
+        if: env.HAS_STOCKX_CDP == 'true'
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-playwright.txt
+        if: env.HAS_STOCKX_CDP == 'true'
+
+      # Both secrets go through the ENVIRONMENT, never a command-line flag
+      # (CLAUDE.md §3: credentials never reach argv). env_config.py already
+      # reads STOCKX_CDP_ENDPOINT/TWOCAPTCHA_KEY unconditionally, so this is
+      # correct with or without either secret set.
+      - name: Run against a filtered, known-good category (>=3 pages — one page never exercises pagination)
+        if: env.HAS_STOCKX_CDP == 'true'
+        env:
+          STOCKX_CDP_ENDPOINT: ${{ secrets.STOCKX_CDP_ENDPOINT }}
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          python3 playwright_scraper.py \
+            --url "https://stockx.com/category/sneakers" \
+            --pages 3 \
+            --format json \
+            --out canary_out.json \
+            --dump-html
+          echo "exit=$?"
+
+      - name: Assert the run is trustworthy, not just non-crashing
+        if: env.HAS_STOCKX_CDP == 'true'
+        run: |
+          python3 -c "
+          import json, os, sys
+          # finish_run() (output_writer.py) writes NO sidecar at all for a
+          # blocked/empty/remote-API-error run — deliberately, so a stale
+          # 'failed' sidecar can never sit beside a PREVIOUS good output
+          # (CLAUDE.md §9). A missing sidecar here is therefore itself the
+          # signal: the run did not complete, full stop, with no exit code
+          # to inspect (this step doesn't have the previous step's \$?).
+          if not os.path.exists('canary_out.json.meta.json'):
+              print('::error::no canary_out.json.meta.json — the run did not complete '
+                    '(blocked / zero products / remote API error all write no sidecar '
+                    'by design; check the previous step\'s log for which)')
+              sys.exit(1)
+          meta = json.load(open('canary_out.json.meta.json'))
+          print(json.dumps(meta, indent=2))
+          assert meta['status'] == 'complete', f\"status={meta['status']!r}, expected complete\"
+          assert meta['pages_completed'] >= 3, meta['pages_completed']
+          assert meta['product_count'] >= 20, meta['product_count']
+          pct = meta.get('price_confirmed_pct') or 0
+          assert pct >= 0.9, f'price_confirmed_pct too low: {pct}'
+          print('canary OK')
+          "
+
+      - name: Upload artifacts (output + debug HTML) on every non-skipped run
+        if: always() && env.HAS_STOCKX_CDP == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ github.run_id }}
+          path: |
+            canary_out.json
+            canary_out.json.meta.json
+            canary_out_p*_debug.html
+          retention-days: 14
