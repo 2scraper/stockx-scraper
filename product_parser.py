@@ -102,6 +102,22 @@ APP_ERROR_MARKERS = (
     'id="__next_error__"',
 )
 
+# A THIRD distinct block-page family, neither the Cloudflare interstitial
+# above nor the Next.js app-error boundary — StockX's own dedicated
+# bot-guard route, reported by a live audit (2026-09-15): a request that
+# gets rejected serves this instead of either of the other two, on a
+# route containing "error/bot-site-guard" with its own visible copy
+# ("Please login to continue. Please log in to verify you are not a bot.").
+# Same rationale as APP_ERROR_MARKERS above: match a stable string, not
+# HTTP status alone, since a driver path that doesn't surface the status
+# code (some CDP/Selenium configurations) would otherwise miss this and
+# misreport it as EXIT_ZERO_PRODUCTS ("this category is empty") for what
+# is actually a hard block.
+BOT_SITE_GUARD_MARKERS = (
+    "error/bot-site-guard",
+    "Please log in to verify you are not a bot",
+)
+
 MIN_CARD_MATCHES = 2  # per family invariant: must be >1, or a single
                        # unrelated link resolves the "rendered" wait early.
 

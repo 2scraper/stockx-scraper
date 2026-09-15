@@ -55,6 +55,32 @@ MIN_CARD_MATCHES = pp.MIN_CARD_MATCHES
 log = logging.getLogger("playwright_scraper")
 
 
+def _positive_int(value: str) -> int:
+    """argparse type: rejects 0 and negative values. A run audit
+    (2026-09-15) found --pages 0 and negative --pages/--concurrency were
+    silently accepted and produced a misleading "complete" 0-page run —
+    see output_writer.finish_run()'s outcome-precedence fix in the same
+    change for the other half of that bug."""
+    ivalue = int(value)
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer (got {value!r})")
+    return ivalue
+
+
+def _nonnegative_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {value!r})")
+    return ivalue
+
+
+def _nonnegative_float(value: str) -> float:
+    fvalue = float(value)
+    if fvalue < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {value!r})")
+    return fvalue
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="stockx.com listing/product scraper — Playwright engine",
@@ -62,13 +88,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--url", default=None, help="Full stockx.com URL (search, /category/*, /browse/*, or a single product page)")
     p.add_argument("--category", default=None, help="Shortcut: a known category/demographic slug, e.g. 'sneakers' or 'men'")
-    p.add_argument("--pages", type=int, default=1, help="Listing pages to fetch (ignored in single-product mode)")
+    p.add_argument("--pages", type=_positive_int, default=1, help="Listing pages to fetch (ignored in single-product mode)")
     p.add_argument("--format", choices=["json", "csv"], default="json")
     p.add_argument("--out", default=None, help="Output path (default: stockx_products.<format>)")
-    p.add_argument("--delay", type=float, default=1.5, help="Base delay between requests, seconds")
-    p.add_argument("--retries", type=int, default=2, help="Retries per page on failure")
-    p.add_argument("--retry-delay", type=float, default=3.0)
-    p.add_argument("--concurrency", type=int, default=1, help="Concurrent listing-page workers (page 1 is always fetched alone first)")
+    p.add_argument("--delay", type=_nonnegative_float, default=1.5, help="Base delay between requests, seconds")
+    p.add_argument("--retries", type=_nonnegative_int, default=2, help="Retries per page on failure")
+    p.add_argument("--retry-delay", type=_nonnegative_float, default=3.0)
+    p.add_argument("--concurrency", type=_positive_int, default=1, help="Concurrent listing-page workers (page 1 is always fetched alone first)")
     p.add_argument("--proxy", default=None, help="A single proxy, e.g. http://login:pass@host:port (or set STOCKX_PROXY)")
     p.add_argument("--proxy-file", default=None, help="One proxy per line, same formats as --proxy")
     p.add_argument("--proxy-rotate", action="store_true", help="Use a fresh proxy (and a fresh browser context) for every page")
@@ -129,8 +155,6 @@ async def _fetch(
             response = await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             await page.wait_for_timeout(READINESS_WAIT_MS)
             html = await page.content()
-            if proxy_pool is not None and current_proxy is not None:
-                proxy_pool.report_success(current_proxy)
             status = response.status if response is not None else None
             return html, current_proxy, status, None
         except Exception as exc:  # noqa: BLE001 — every remote call must be bounded and reported
@@ -251,9 +275,13 @@ async def scrape_listing(
             # dump-html / diagnostics below.
             log.warning("Page %d returned HTTP %d — treating as blocked, not empty.", n, status)
             blocked = True
+            if proxy_pool is not None and used_proxy is not None and status in (403, 429):
+                proxy_pool.report_failure(used_proxy, dead=True)
+        elif status is not None and proxy_pool is not None and used_proxy is not None:
+            proxy_pool.report_success(used_proxy)
         if args.dump_html:
             Path(_dump_path(args.out, n)).write_text(html, encoding="utf-8")
-        if detect_from_html(html, pp.APP_ERROR_MARKERS):
+        if detect_from_html(html, pp.APP_ERROR_MARKERS) or detect_from_html(html, pp.BOT_SITE_GUARD_MARKERS):
             blocked = True
         captcha_result = await _maybe_solve_captcha(html=html, url=url, client=client, policy=args.solve_captcha)
         if captcha_result and captcha_result.get("action") in ("warning_no_key", "warning_solver_error", "detected_unidentified_widget"):
@@ -299,7 +327,7 @@ async def scrape_listing(
                 # but only if a real challenge marker is present (see
                 # product_parser.BOT_CHALLENGE_MARKERS on why the ambient
                 # Cloudflare script tag alone does NOT count).
-                if detect_from_html(html, pp.BOT_CHALLENGE_MARKERS):
+                if detect_from_html(html, pp.BOT_CHALLENGE_MARKERS) or detect_from_html(html, pp.BOT_SITE_GUARD_MARKERS):
                     blocked = True
 
     total_pages = args.pages
@@ -373,9 +401,13 @@ async def scrape_single_product(
     if status is not None and status >= 400:
         log.warning("Product page returned HTTP %d — treating as blocked, not empty.", status)
         blocked = True
+        if proxy_pool is not None and proxy is not None and status in (403, 429):
+            proxy_pool.report_failure(proxy, dead=True)
+    elif status is not None and proxy_pool is not None and proxy is not None:
+        proxy_pool.report_success(proxy)
     if args.dump_html:
         Path(_dump_path(args.out, 1)).write_text(html, encoding="utf-8")
-    if detect_from_html(html, pp.APP_ERROR_MARKERS):
+    if detect_from_html(html, pp.APP_ERROR_MARKERS) or detect_from_html(html, pp.BOT_SITE_GUARD_MARKERS):
         blocked = True
     await _maybe_solve_captcha(html=html, url=url, client=client, policy=args.solve_captcha)
     product = pp.parse_product_detail(html, requested_url=url)

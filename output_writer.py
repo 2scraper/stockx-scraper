@@ -208,33 +208,41 @@ def finish_run(
     partial = bool(failed_pages) and pages_completed > 0
     zero_products = len(products) == 0
 
-    # The "never overwrite good output with empty" rule applies to EVERY
-    # zero-product outcome — blocked and remote-API-error included — not
-    # just the generic "found nothing" case. Only --allow-empty opts out.
-    # This branch must be checked before blocked/remote_api_error below,
-    # or a blocked run with zero products would still write an empty file.
-    if zero_products and not allow_empty:
-        # NEVER write a sidecar here — this branch's whole point is that a
-        # PREVIOUS good <out>.json is left in place untouched, and a
-        # "blocked"/"empty_not_written" sidecar sitting right beside it
-        # would contradict that good data rather than describe it (this
-        # function's own docstring above, README's exit-code table, and
-        # CLAUDE.md §9 all promise this — a caller checking the sidecar to
-        # decide whether to trust <out>.json must never see a stale
-        # failure status next to data that's actually fine). The engine's
-        # own logs carry the diagnostic detail (which status, which pages)
-        # — that's what a failed run's output is FOR, not this file.
-        if remote_api_error:
-            exit_code = EXIT_REMOTE_API_ERROR
-        elif blocked:
-            exit_code = EXIT_BLOCKED
-        else:
-            exit_code = EXIT_ZERO_PRODUCTS
-        return exit_code
+    # Outcome precedence — decided ONCE, independent of --allow-empty.
+    # `--allow-empty` controls only whether a zero-product result gets
+    # WRITTEN as a file (below); it must never launder a blocked or
+    # remote-API-error run into a "complete" status just because the
+    # caller also passed --allow-empty, and it must never do so just
+    # because SOME pages did return products while the run was, in fact,
+    # blocked partway through. A run audit (2026-09-15) found exactly
+    # this: with products present, or with --allow-empty set, `blocked`/
+    # `remote_api_error` were silently ignored and the run reported
+    # "complete", exit 0 — a monitoring/cron consumer would trust a run
+    # that never should have been trusted.
+    if remote_api_error:
+        status, exit_code = "remote_api_error", EXIT_REMOTE_API_ERROR
+    elif blocked:
+        status, exit_code = "blocked", EXIT_BLOCKED
+    elif zero_products:
+        status, exit_code = "empty", EXIT_ZERO_PRODUCTS
     elif partial:
         status, exit_code = "partial", EXIT_PARTIAL
     else:
         status, exit_code = "complete", EXIT_OK
+
+    # The "never overwrite good output with empty" rule: a zero-product
+    # outcome (whatever its status above — blocked/remote_api_error/empty
+    # all zero out `products`) writes NEITHER file NOR sidecar unless the
+    # caller explicitly opted in with --allow-empty. NEVER write a sidecar
+    # in the not-written case — this branch's whole point is that a
+    # PREVIOUS good <out>.json is left in place untouched, and a stale
+    # failure sidecar sitting right beside it would contradict that good
+    # data rather than describe it (this function's own docstring above,
+    # README's exit-code table, and CLAUDE.md §9 all promise this). The
+    # engine's own logs carry the diagnostic detail — that's what a failed
+    # run's output is FOR, not this file.
+    if zero_products and not allow_empty:
+        return exit_code
 
     write_output(products, out_path, fmt)
     write_meta(
