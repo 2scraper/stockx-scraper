@@ -32,6 +32,14 @@ rather than being a silent violation of that.
   block. Byte-compiling cannot see it, since unreachable code is still valid
   code. Six repos in this family carried the same fifteen unreachable lines
   from their first commit; this tree is clean, and the check keeps it clean.
+- The workflow-wiring check tolerates being run **inside the Docker image**,
+  where `RUN python3 smoke_test.py` executes this suite at build time and
+  `.github/` is deliberately not COPYed — the image carries no CI material,
+  which is itself something CI asserts about it. The escape is narrow on
+  purpose: it triggers only when the whole `.github` directory is absent,
+  never when a file inside it is missing, because a check that quietly
+  passes once its input disappears is worse than no check. Verified in all
+  three states — wired, unwired, and no `.github` at all.
 - **A check that binds every call into a shared module against the callee's
   real signature** (§17's check #1). It catches a call whose arguments do not
   fit and a call to a name the shared module does not define at all — both of

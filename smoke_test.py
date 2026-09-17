@@ -1067,10 +1067,25 @@ def _():
     wholesale -- the file most likely to acquire a real credential by paste
     while debugging was the one file nobody scanned.
     """
-    script = ROOT / ".github" / "ci_checks.py"
+    # This suite also runs INSIDE the Docker image, where `RUN python3
+    # smoke_test.py` executes it at build time and `.github/` is
+    # deliberately not COPYed -- the image carries no CI material, which is
+    # itself one of the things CI asserts about it. So the subject of this
+    # check (the repo's wiring) does not exist there.
+    #
+    # The escape is narrow ON PURPOSE: it triggers only when the whole
+    # `.github` directory is absent, never when a file inside it is missing.
+    # A check that quietly passes because its input disappeared is the
+    # failure mode CLAUDE.md §21 describes -- a guard is only as good as the
+    # fixture it runs against.
+    github = ROOT / ".github"
+    if not github.is_dir():
+        return          # inside the image: nothing to assert about CI here
+
+    script = github / "ci_checks.py"
     assert script.is_file(), ".github/ci_checks.py is missing"
 
-    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    workflow = (github / "workflows" / "tests.yml").read_text(encoding="utf-8")
     assert "ci_checks.py --secret-check" in workflow, (
         "tests.yml does not invoke the shipped credential scan; a script no "
         "workflow runs is dead code that looks load-bearing")
