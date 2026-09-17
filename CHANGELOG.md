@@ -40,6 +40,17 @@ rather than being a silent violation of that.
   never when a file inside it is missing, because a check that quietly
   passes once its input disappears is worse than no check. Verified in all
   three states — wired, unwired, and no `.github` at all.
+- **A check that the three engines expose exactly the same CLI flags**, in
+  both directions. Measured 2026-09-17: **23 flags, identical across all
+  three, no exceptions** — a stronger position than the rest of this family,
+  where per-engine differences are documented and carried, so it is worth
+  pinning rather than leaving to drift. §20 records why this is written
+  before it is needed: a sibling's README promised "same CLI" while its
+  primary engine had twelve flags its twins did not, nine of them predating
+  the claim. The extractor counts only the argparse parser's own
+  `add_argument` calls — `options.add_argument("--no-sandbox")` is a Chrome
+  switch handed to chromedriver, not a flag of this tool, and counting those
+  made Selenium look like it had three extra flags.
 - **A check that binds every call into a shared module against the callee's
   real signature** (§17's check #1). It catches a call whose arguments do not
   fit and a call to a name the shared module does not define at all — both of

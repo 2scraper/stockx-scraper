@@ -1217,6 +1217,65 @@ def _():
     assert bound_count > 10, f"only {bound_count} shared call(s) bound"
 
 
+@check("the three engines expose exactly the same CLI flags (CLAUDE.md §17, §20)")
+def _():
+    """A sibling repo's README promised "same CLI" while the primary engine
+    had TWELVE flags its twins did not, nine of them predating the claim --
+    and nothing noticed, because no check compared the sets. The lesson
+    recorded with it is that this check is worth writing BEFORE it is needed.
+
+    Asserted in BOTH directions. A new unshared flag fails, which is the
+    obvious half. So does a shrinking exception list: if a difference is ever
+    documented here and then closed, this check has to be updated with it,
+    or the documentation keeps describing a limitation that is gone.
+
+    Measured on 2026-09-17: 23 flags, identical across all three engines, no
+    exceptions. That is a stronger position than the rest of this family --
+    siblings carry documented per-engine differences -- so it is worth
+    pinning rather than leaving to drift.
+    """
+    ENGINE_SPECIFIC = {
+        # Empty, and that is the assertion. An entry here would be a
+        # documented exception; today there are none.
+    }
+
+    def cli_flags(module_name):
+        tree = ast.parse((ROOT / f"{module_name}.py").read_text(encoding="utf-8"))
+        found = set()
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "add_argument"):
+                continue
+            # Only the argparse parser, never a browser's option bag:
+            # `options.add_argument("--no-sandbox")` is a Chrome switch
+            # handed to chromedriver, not a flag of this tool. Counting
+            # those made selenium look like it had three extra flags.
+            if not (isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "p"):
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and str(arg.value).startswith("--"):
+                    found.add(arg.value)
+        return found
+
+    sets = {name: cli_flags(name) for name in _ENGINE_NAMES}
+    assert all(sets.values()), f"no flags found in {[k for k, v in sets.items() if not v]}"
+    shared = set.intersection(*sets.values())
+    assert len(shared) >= 20, f"only {len(shared)} shared flags — did the extractor stop matching?"
+
+    for name, flags in sets.items():
+        undocumented = sorted(flags - shared - set(ENGINE_SPECIFIC.get(name, ())))
+        assert not undocumented, (
+            f"{name} has flag(s) its twins do not, and they are not "
+            f"documented as engine-specific: {undocumented}")
+        stale = sorted(set(ENGINE_SPECIFIC.get(name, ())) - (flags - shared))
+        assert not stale, (
+            f"{name}: {stale} is listed as an engine-specific exception but "
+            f"is now shared — remove it, or the docs describe a limitation "
+            f"that is gone")
+
+
 def run() -> int:
     """All @check-decorated functions above already ran at import time
     (that's the point — see the `check()` docstring) and self-registered
