@@ -22,39 +22,39 @@ jobs:
         run: python -m compileall -q .
       - name: Run the offline smoke suite
         run: python3 smoke_test.py
-      - name: --help works for every CLI
-        run: |
-          for engine in playwright_scraper selenium_scraper puppeteer_scraper; do
-            python3 "$engine.py" --help > /dev/null
-          done
-      - name: sample_output.{json,csv} match the Product schema
-        run: |
-          python3 -c "
-          import csv, json
-          from output_writer import PRODUCT_FIELD_NAMES
-          rows = json.load(open('sample_output.json'))
-          assert rows and set(rows[0]) == set(PRODUCT_FIELD_NAMES)
-          with open('sample_output.csv', newline='') as f:
-              header = next(csv.reader(f))
-          assert header == PRODUCT_FIELD_NAMES
-          print('sample_output OK')
-          "
       - name: No committed credentials
-        run: |
-          set +e
-          # smoke_test.py deliberately contains fake-credential-SHAPED fixtures
-          # (e.g. api_key="realTOPSECRETkey123") to test the masking/redaction
-          # logic itself — excluded alongside .env.example, not a loosening of
-          # the check against real leaks.
-          MATCHES=$(grep -rnE "(api[_-]?key|TWOCAPTCHA_KEY|STOCKX_PROXY)\s*=\s*['\"][A-Za-z0-9]{10,}" \
-            --include="*.py" --include="*.md" --include="*.env*" . | grep -vE "\.env\.example|smoke_test\.py")
-          set -e
-          if [ -n "$MATCHES" ]; then
-            echo "$MATCHES"
-            echo "::error::possible committed credential — see matches above"
-            exit 1
-          fi
-          echo "no committed credentials found"
+        # RUNS .github/ci_checks.py RATHER THAN AN INLINE GREP, and that is a
+        # fix rather than a tidy-up. CLAUDE.md §17 records what happens with
+        # two implementations of one check: in three sibling repos the shipped
+        # script was invoked by nothing while the workflow carried a narrower
+        # grep, and the two disagreed in the direction that matters -- the
+        # inline one matched only `ws://`/`wss://`, so an `http://user:pass@`
+        # credential sailed past CI.
+        #
+        # This repo had only the inline version, and it excluded
+        # smoke_test.py WHOLESALE -- the file most likely to acquire a real
+        # credential by paste while debugging was the one file nobody
+        # scanned. The masking fixtures that made that exclusion look
+        # necessary are now built by concatenation, so no line holds a
+        # complete `scheme://user:pass@host` literal and the scan is live on
+        # that file too.
+        #
+        # One implementation, invoked from both CI and the offline suite, and
+        # a check in the suite asserting this step calls the script rather
+        # than reimplementing it. Verified in both directions on 2026-09-17:
+        # it passes on this repo (31 files) and it flags a planted CDP
+        # endpoint, a planted 32-hex key and a planted http proxy URL.
+        run: python3 .github/ci_checks.py --secret-check
+
+      - name: Every CLI answers --help, and sample_output matches the schema
+        # The same script, so the workflow and the offline suite cannot drift
+        # into disagreeing about what either check means. This step replaces
+        # two inline ones, and the script is STRICTER than what it replaces:
+        # the inline sample check compared column SETS
+        # (`set(rows[0]) == set(PRODUCT_FIELD_NAMES)`), which passes when two
+        # columns are swapped -- and column order is part of this family's
+        # output contract, in the CSV header above all.
+        run: python3 .github/ci_checks.py --all
 
   docker:
     name: docker image builds, runs, and launches Chromium

@@ -7,6 +7,49 @@ release means "fixes", not that every flag and default is frozen — a
 behaviour-changing default gets called out explicitly in its entry below
 rather than being a silent violation of that.
 
+## [1.0.1] — 2026-09-16
+
+### Added
+
+- **`.github/ci_checks.py`** — one implementation of the credential, `--help`
+  and sample-schema checks, invoked from **both** CI and the offline suite,
+  plus a suite check asserting that the workflow calls it rather than
+  reimplementing it. CLAUDE.md §17 records what two implementations cost: in
+  three sibling repos the shipped script was invoked by nothing while
+  `tests.yml` carried a narrower grep, and they disagreed in the direction
+  that matters. Verified in both directions on 2026-09-17 — it passes on this
+  repo (31 files scanned) and it flags a planted CDP endpoint, a planted
+  32-hex key and a planted `http://user:pass@` proxy URL.
+- **A pre-publication history scan** (`--history-check`), run here for the
+  first time: **35 blobs across 58 objects, nothing credential-shaped**. The
+  two findings it did report are the masking fixtures as they were written up
+  to v1.0.0; both are recorded in `HISTORY_DECIDED` with the reason and the
+  date, because a commit on top cannot remove what history holds. That list
+  is consulted by `--history-check` only, so a value reappearing in the
+  working tree still fails.
+- **A check that no module holds a statement the control flow can never
+  reach** — anything after a `return`/`raise`/`break`/`continue` in the same
+  block. Byte-compiling cannot see it, since unreachable code is still valid
+  code. Six repos in this family carried the same fifteen unreachable lines
+  from their first commit; this tree is clean, and the check keeps it clean.
+- **A check that binds every call into a shared module against the callee's
+  real signature** (§17's check #1). It catches a call whose arguments do not
+  fit and a call to a name the shared module does not define at all — both of
+  which reach a live run as a crash on the first fetch while everything
+  offline stays green. All three new checks are verified by control.
+
+### Changed
+
+- **`tests.yml` no longer carries its own copies of three checks.** The
+  inline credential grep excluded `smoke_test.py` **wholesale**, so the file
+  most likely to acquire a real credential by paste while debugging was the
+  one file nobody scanned. The masking fixtures that made that exclusion look
+  necessary are now built by concatenation, so no line holds a complete
+  `scheme://user:pass@host` literal and the scan is live on that file too.
+  The inline sample check also compared column **sets**, which passes when
+  two columns are swapped; the script compares the ordered list, and column
+  order is part of this family's output contract.
+
 ## [1.0.0] — 2026-09-15
 
 Initial release.

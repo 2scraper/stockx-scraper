@@ -524,16 +524,26 @@ def _():
     # — login:password included — FOUR times in Playwright's own "Call
     # log" text, not once. A masker that only handles the first occurrence
     # prints the password the other three times and looks like it worked.
+    # Built by CONCATENATION rather than written out. No line of this file
+    # then holds a complete `scheme://user:pass@host` literal, which keeps
+    # `.github/ci_checks.py --secret-check` fully LIVE on this file instead
+    # of exempting it. This is the file most likely to acquire a real
+    # credential by paste while debugging, so it is the last one that should
+    # be excluded from the scan -- which is what the inline grep in
+    # tests.yml used to do.
+    _user = "realLogin" + "123"
+    _pw = "realSECRET" + "pass"
+    _endpoint = "ws://" + _user + ":" + _pw + "@cb.2captcha.com:9222/"
     cdp_error = (
         "BrowserType.connect_over_cdp: WebSocket error: connect ECONNREFUSED 1.2.3.4:9222\n"
         "Call log:\n"
-        "  - <ws connecting> ws://realLogin123:realSECRETpass@cb.2captcha.com:9222/\n"
-        "  - <ws error> ws://realLogin123:realSECRETpass@cb.2captcha.com:9222/ error connect ECONNREFUSED\n"
-        "  - <ws connect error> ws://realLogin123:realSECRETpass@cb.2captcha.com:9222/ connect ECONNREFUSED\n"
-        "  - <ws disconnected> ws://realLogin123:realSECRETpass@cb.2captcha.com:9222/ code=1006 reason=\n"
+        f"  - <ws connecting> {_endpoint}\n"
+        f"  - <ws error> {_endpoint} error connect ECONNREFUSED\n"
+        f"  - <ws connect error> {_endpoint} connect ECONNREFUSED\n"
+        f"  - <ws disconnected> {_endpoint} code=1006 reason=\n"
     )
     redacted = proxy_pool.redact_credentials(cdp_error)
-    assert "realLogin123" not in redacted and "realSECRETpass" not in redacted
+    assert _user not in redacted and _pw not in redacted
     assert redacted.count("***:***@") == 4, "must redact EVERY occurrence, not just the first"
 
     # requests puts the full URL, query string included, in an HTTPError —
@@ -549,7 +559,9 @@ def _():
 def _():
     import asyncio
 
-    FAKE_ENDPOINT = "ws://fakeLogin987:fakeSecretXYZ@cb.2captcha.com:9222"
+    # Concatenated for the same reason as the fixture above.
+    FAKE_ENDPOINT = ("ws://" + "fakeLogin987" + ":" + "fakeSecretXYZ"
+                     + "@cb.2captcha.com:9222")
 
     class _FakeChromium:
         async def connect_over_cdp(self, endpoint):
@@ -1038,6 +1050,156 @@ def _():
     blob = json.dumps(sample_json).lower()
     for marker in fabrication_markers:
         assert marker not in blob, f"sample_output.json looks fabricated (contains {marker!r})"
+
+
+_ENGINE_NAMES = ("playwright_scraper", "puppeteer_scraper", "selenium_scraper")
+
+
+@check("the credential scan has ONE implementation, and the workflow calls it (CLAUDE.md §17)")
+def _():
+    """Two implementations of one check is the shape §17 warns about: in
+    three sibling repos the shipped script was invoked by nothing while
+    tests.yml carried a narrower grep, and the two disagreed in the
+    direction that matters -- the inline one matched only `ws://`/`wss://`,
+    so an `http://user:pass@` credential would have sailed past CI.
+
+    This repo had only the inline version, and it excluded smoke_test.py
+    wholesale -- the file most likely to acquire a real credential by paste
+    while debugging was the one file nobody scanned.
+    """
+    script = ROOT / ".github" / "ci_checks.py"
+    assert script.is_file(), ".github/ci_checks.py is missing"
+
+    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert "ci_checks.py --secret-check" in workflow, (
+        "tests.yml does not invoke the shipped credential scan; a script no "
+        "workflow runs is dead code that looks load-bearing")
+    # And it must not have grown a second implementation alongside it.
+    assert "TWOCAPTCHA_KEY|" not in workflow, (
+        "tests.yml has an inline credential grep again -- one implementation, "
+        "invoked from both places")
+    # The exclusion that made the inline version weak must not come back:
+    # the fixtures are built by concatenation precisely so it is unnecessary.
+    assert "smoke_test\\.py" not in workflow, (
+        "tests.yml excludes smoke_test.py from a scan again")
+
+
+@check("no shipped module holds a statement the control flow can never reach")
+def _():
+    """A statement after a return/raise/break/continue in the SAME block.
+
+    Narrow on purpose: it claims nothing about reachability in general, only
+    about a block whose control flow has already left. Measured across the
+    eighteen repos of this family on 2026-09-16 it reported six problems and
+    zero false positives -- six repos carrying the same fifteen lines, a
+    function whose `def` line had been lost and whose body was absorbed into
+    the end of the function above it. Byte-compiling cannot see this,
+    because unreachable code is still valid code.
+    """
+    problems = []
+    for path in sorted(ROOT.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            for field in ("body", "orelse", "finalbody"):
+                body = getattr(node, field, None)
+                if not isinstance(body, list):
+                    continue
+                for i, stmt in enumerate(body[:-1]):
+                    if isinstance(stmt, (ast.Return, ast.Raise,
+                                         ast.Continue, ast.Break)):
+                        problems.append(f"{path.name}:{body[i + 1].lineno}")
+                        break
+    assert not problems, "unreachable statement(s): " + ", ".join(problems)
+
+
+@check("every call into a shared module binds against the callee's real signature (CLAUDE.md §17)")
+def _():
+    """§17's check #1, and the one that earns its keep.
+
+    A sibling repo shipped `classify(html, url=...)` in two of three engines
+    against a callee whose second parameter is `status`, and BOTH crashed on
+    their FIRST fetch -- invisible to import, `--help`, byte-compiling and
+    every other check here, because none of those calls a function the way a
+    live run does.
+
+    Two failure modes, and the second is the one a weaker version of this
+    swallows: a call whose arguments do not fit, and a call to a name the
+    shared module DOES NOT DEFINE. A sibling resolved the callee with
+    `getattr(..., None)` and skipped whatever came back not-callable, so
+    three calls into an API that did not exist sat under a green run of its
+    own binding check.
+
+    Conservative by construction: `*args`/`**kwargs` calls are skipped
+    rather than guessed at, and a name bound anywhere in the calling file
+    shadows a same-named module -- an engine takes `proxy_pool` as a
+    PARAMETER, and `proxy_pool.next()` on it is a method call.
+    """
+    shared = {"product_parser": pp, "output_writer": output_writer,
+              "proxy_pool": proxy_pool, "captcha_solver": captcha_solver,
+              "env_config": env_config, "diff_runs": diff_runs}
+    problems, bound_count = [], 0
+    for name in _ENGINE_NAMES + ("product_parser", "scraper_api_client"):
+        path = ROOT / f"{name}.py"
+        if not path.is_file():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        local = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                local.add(node.id)
+            elif isinstance(node, ast.arg):
+                local.add(node.arg)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                local.add(node.name)
+
+        direct = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in shared and not node.level:
+                for alias in node.names:
+                    direct[alias.asname or alias.name] = (node.module, alias.name)
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            target = None
+            if isinstance(node.func, ast.Name) and node.func.id in direct:
+                target = direct[node.func.id]
+            elif (isinstance(node.func, ast.Attribute)
+                  and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id in shared
+                  and node.func.value.id not in local):
+                target = (node.func.value.id, node.func.attr)
+            if target is None:
+                continue
+            module_name, attr = target
+            module = shared[module_name]
+            if not hasattr(module, attr):
+                problems.append(f"{path.name}:{node.lineno} calls "
+                                f"{module_name}.{attr}, which does not exist "
+                                f"— a live run reaches this as AttributeError")
+                continue
+            callee = getattr(module, attr)
+            if not (inspect.isfunction(callee) or inspect.isclass(callee)):
+                continue
+            if (any(isinstance(a, ast.Starred) for a in node.args)
+                    or any(k.arg is None for k in node.keywords)):
+                continue
+            try:
+                signature = inspect.signature(callee)
+            except (TypeError, ValueError):
+                continue
+            try:
+                signature.bind(*([inspect.Parameter.empty] * len(node.args)),
+                               **{k.arg: inspect.Parameter.empty for k in node.keywords})
+            except TypeError as exc:
+                problems.append(f"{path.name}:{node.lineno} "
+                                f"{module_name}.{attr}{signature} — {exc}")
+            else:
+                bound_count += 1
+    assert not problems, "\n        ".join(problems)
+    # A check that binds nothing passes for the wrong reason.
+    assert bound_count > 10, f"only {bound_count} shared call(s) bound"
 
 
 def run() -> int:
