@@ -24,6 +24,12 @@ EXIT_BAD_USAGE = 2
 EXIT_BLOCKED = 3
 EXIT_ZERO_PRODUCTS = 4
 EXIT_REMOTE_API_ERROR = 5
+# The same code, under the name the rest of this family uses for it as of
+# 2026-09-21. 5 means "the content was never obtained" — a remote API error
+# is one way for that to happen and a dead proxy or a load timeout is
+# another, and a caller driving several of these scrapers should not need a
+# per-repo table to learn that. See CLAUDE.md §25.
+EXIT_FETCH_FAILED = EXIT_REMOTE_API_ERROR
 EXIT_PARTIAL = 6
 
 STATUS_BY_EXIT = {
@@ -207,6 +213,13 @@ def finish_run(
     failed_pages = failed_pages or []
     partial = bool(failed_pages) and pages_completed > 0
     zero_products = len(products) == 0
+    # Pages were attempted and NONE completed: the content was never
+    # obtained, which is a different fact from "we read the listing and it
+    # held nothing". `partial` deliberately excludes this case (it requires
+    # pages_completed > 0), so without this it fell through to
+    # EXIT_ZERO_PRODUCTS and told a pipeline the catalogue was empty on a
+    # run that never reached the site.
+    never_obtained = bool(failed_pages) and pages_completed == 0
 
     # Outcome precedence — decided ONCE, independent of --allow-empty.
     # `--allow-empty` controls only whether a zero-product result gets
@@ -220,9 +233,13 @@ def finish_run(
     # "complete", exit 0 — a monitoring/cron consumer would trust a run
     # that never should have been trusted.
     if remote_api_error:
-        status, exit_code = "remote_api_error", EXIT_REMOTE_API_ERROR
+        status, exit_code = "remote_api_error", EXIT_FETCH_FAILED
     elif blocked:
         status, exit_code = "blocked", EXIT_BLOCKED
+    elif never_obtained:
+        # Ahead of zero_products on purpose: exit 4 is a claim about the
+        # CATALOGUE and this run has no standing to make it.
+        status, exit_code = "fetch_failed", EXIT_FETCH_FAILED
     elif zero_products:
         status, exit_code = "empty", EXIT_ZERO_PRODUCTS
     elif partial:
