@@ -4,13 +4,12 @@ surface. No site knowledge. `captcha_solver.py` and `fingerprint_client.py`
 both sit on top of this rather than calling `requests` directly, so there is
 exactly one place that knows the base URL, auth shape and error envelope.
 
-Covers three of 2Captcha's four separately-billed products behind one key
-(the fourth, proxies, is `proxy_pool.py` + STOCKX_PROXY — a 2captcha.com/
+Covers two of 2Captcha's separately-billed products behind one key
+(proxies are `proxy_pool.py` + STOCKX_PROXY — a 2captcha.com/
 proxy credential, 2prx.com is a synonym for the same product, not a
 separate host):
 
   - classic captcha solving (createTask / getTaskResult)
-  - the Scraping Browser API (POST /browser/connection -> a CDP URL)
   - the Fingerprint API (GET /fingerprint/random)
 
 Never construct a competitor's API call from this module.
@@ -56,7 +55,15 @@ class TwoCaptchaClient:
         return self.api_key
 
     def _post(self, path: str, payload: dict) -> dict:
-        resp = requests.post(f"{API_BASE}{path}", json=payload, timeout=self.timeout)
+        # A transport failure (DNS, refused connection, timeout) is a solver
+        # error like any other, not a crash: callers catch TwoCaptchaError
+        # and carry on. The key travels in the JSON body, not the URL, but
+        # the text is redacted anyway and the original dropped from the
+        # chain, so no future URL change can leak one through here.
+        try:
+            resp = requests.post(f"{API_BASE}{path}", json=payload, timeout=self.timeout)
+        except requests.exceptions.RequestException as exc:
+            raise TwoCaptchaError(f"{path} request failed: {redact_credentials(str(exc))}") from None
         try:
             data = resp.json()
         except ValueError as exc:
@@ -109,30 +116,14 @@ class TwoCaptchaClient:
         raise TwoCaptchaError(f"solve timed out after {max_wait:.0f}s")
 
     # ----------------------------------------------------------------- #
-    # Scraping Browser API — one live CDP connection per profile
-    # ----------------------------------------------------------------- #
-    def scraping_browser_connection_url(
-        self, *, country: Optional[str] = None, profile_id: Optional[str] = None
-    ) -> str:
-        """Returns a `ws://...@cb.2captcha.com:9222` endpoint. Reuse
-        `profile_id` across runs rather than minting a fresh one every
-        time — profiles are capped per account and each allows exactly one
-        live connection."""
-        key = self._require_key()
-        login = key  # 2Captcha's Scraping Browser auths the login on the key
-        cc = f"-country-{country}" if country else ""
-        pid = f"-pid-{profile_id}" if profile_id else ""
-        return f"ws://{login}-zone-scraping_browser{cc}{pid}:{key}@cb.2captcha.com:9222"
-
-    # ----------------------------------------------------------------- #
     # Fingerprint API
     # ----------------------------------------------------------------- #
     def random_fingerprint(self, *, tags: Optional[str] = None, country: Optional[str] = None) -> dict:
         # Unlike createTask/getTaskResult/getBalance above, this endpoint
         # takes its key as a URL query parameter (`?key=...`), not a JSON
         # body — and `requests` puts the FULL URL, query string included,
-        # into the text of every HTTPError and connection error (CLAUDE.md
-        # §8 names this exact endpoint). Redact before raising, and drop
+        # into the text of every HTTPError and connection error, so the key
+        # would land in any log that prints the error. Redact before raising, and drop
         # the original exception from the chain (`from None`) so its own
         # unredacted text can't surface via "the above exception was the
         # direct cause of…".

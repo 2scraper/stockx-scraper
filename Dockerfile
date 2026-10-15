@@ -1,6 +1,6 @@
 # Playwright engine only (the primary one) — Selenium/pyppeteer need their
-# own images per requirements-*.txt (see §6/§11: the three engines' pins
-# are mutually unsatisfiable in one environment).
+# own images per requirements-*.txt (the three engines' pins are mutually
+# unsatisfiable in one environment).
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -31,9 +31,9 @@ COPY tests ./tests
 RUN python3 smoke_test.py
 
 # The test suite and its fixtures are needed to VERIFY the build above, not
-# to run the scraper — CLAUDE.md §11: "the image should carry no test suite
-# and no stray .env" (a .env was never COPYed here in the first place; this
-# is the "no test suite / no fixtures" half of that same rule). Strip them
+# to run the scraper: the image should carry no test suite and no stray
+# .env (a .env was never COPYed here in the first place; this is the
+# "no test suite / no fixtures" half of that rule). Strip them
 # from the final layer rather than leaving them in a published image.
 RUN rm -rf smoke_test.py tests
 

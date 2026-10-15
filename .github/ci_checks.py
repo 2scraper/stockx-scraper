@@ -138,7 +138,7 @@ SCANNED_SUFFIXES = (".py", ".md", ".txt", ".yml", ".yaml", ".example")
 # into pip's vendored code and flags a 32-hex string in `_elffile.py` as
 # key-shaped. Correct about the string, wrong about the file — and it is the
 # FIRST thing a new user sees from `python3 smoke_test.py`. A guard people
-# have to argue with is one they learn to suppress (CLAUDE.md §22).
+# have to argue with is one they learn to suppress.
 #
 # Deliberately NOT a narrowing of what gets scanned: an untracked file is
 # still read, because a key pasted into a scratch file beside the scripts is
@@ -165,12 +165,18 @@ def _is_in_virtualenv(path):
     return False
 
 
+# Matched against the path RELATIVE to the repository, never the absolute
+# one: a clone that sits under a directory named `venv` (or `.git`, or
+# `__pycache__`) used to have every file skipped, and the scan reported
+# "ok, 0 files scanned" (reproduced 2026-10-14).
+_SKIPPED_DIRS = {".git", "__pycache__", ".venv", "venv"}
+
+
 def scanned_files():
     for path in sorted(REPO.rglob("*")):
         if not path.is_file() or path.suffix not in SCANNED_SUFFIXES:
             continue
-        if any(part in {".git", "__pycache__", ".venv", "venv"}
-               for part in path.parts):
+        if any(part in _SKIPPED_DIRS for part in path.relative_to(REPO).parts):
             continue
         if _is_in_virtualenv(path):
             continue
@@ -267,6 +273,11 @@ def secret_check():
                 failed.append(f"{rel}:{lineno} contains {match[:6]}… — a "
                               f"32-char hex string, the shape of a 2captcha key")
 
+    # A scan that read nothing has proved nothing: fail rather than print
+    # "ok" over an empty walk.
+    if scanned == 0:
+        failed.append("0 files scanned — the walk skipped everything, so this "
+                      "check proved nothing")
     if not failed:
         print(f"ok       {scanned} files scanned, nothing credential-shaped")
     return failed

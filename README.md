@@ -11,20 +11,20 @@
 StockX listing-page scraper: search results, category/browse listings, and
 single product pages. Three engines (Playwright primary, Selenium and
 Puppeteer/pyppeteer for parity), JSON or CSV output, an open, documented
-`Product` schema. Part of the [2scraper](https://github.com/2scraper) family
-— see `CLAUDE.md` if this repo ships one, for the shared architecture this
-follows.
+`Product` schema. Part of the [2scraper](https://github.com/2scraper) family.
 
 ## What was actually measured
 
-Live captures against stockx.com, 2026-09-10:
+Live captures against stockx.com, 2026-09-10, unless a bullet says
+otherwise. Access has not been re-measured since 2026-09-14.
 
-- **An ordinary headless Chromium, no proxy, no 2Captcha key, no account,
-  cleared stockx.com's Cloudflare bot-management scripts** and returned
-  full search/category/product data on every page requested. If your
-  traffic looks like this too, you may not need the paid products at all —
-  they buy you volume from many addresses, a specific exit country, or a
-  consistent device identity, not passage through a wall that wasn't there.
+- **On 2026-09-10, an ordinary headless Chromium, no proxy, no 2Captcha
+  key, no account, cleared stockx.com's Cloudflare bot-management scripts**
+  and returned full search/category/product data on every page requested.
+  **On 2026-09-13/14 that changed**: direct and residential-proxy runs got a
+  fast HTTP 403, and only a Scraping Browser API (`--cdp-endpoint`) session
+  got through (see "Known limitations"). Try the free path first and read
+  the exit code — `3` means stockx.com refused this client.
 - **Search and category listing pages carry exactly one JSON-LD block**
   (`BreadcrumbList` — zero products in it). The real data source is
   stockx.com's own embedded Next.js payload: a `__NEXT_DATA__` script tag
@@ -138,13 +138,37 @@ defaulted guess. See `sample_output.json` / `sample_output.csv` for real
 rows (cut from an actual capture, not fabricated — `smoke_test.py` checks
 for fabrication markers).
 
-**Exit codes**: `0` complete · `1` crash · `2` bad usage · `3` blocked ·
-`4` zero products (and nothing was written) · `5` remote API error · `6`
-partial (some pages failed, some data was still written). Every run writes
-a `<out>.meta.json` sidecar with `status`, `pages_completed`,
-`failed_pages` and `price_confirmed_pct` — **except** a failed/empty run,
-which writes no sidecar and no output at all, so it can never overwrite a
-previous good run (`--allow-empty` opts out of that guard).
+**Exit codes**:
+
+| Exit | `status` | Meaning |
+|---|---|---|
+| `0` | `complete` | Every requested page was served and parsed |
+| `1` | — | Crash |
+| `2` | — | Bad usage (including a negative count, `--pages 0`, or `--url` with `--category`) |
+| `3` | `blocked` | stockx.com refused the session (an HTTP error other than 404/410, its bot-guard or error page, a Cloudflare interstitial, or a captcha nothing cleared) |
+| `4` | `empty` | The page's own data says there are zero results |
+| `5` | `fetch_failed` / `not_found` / `parser_found_nothing` / `remote_api_error` | No rows, and the requested content was never obtained: the page never loaded, the address answered 404/410, or the page was served but its rows could not be read (a page-shape change, not an empty catalogue) |
+| `6` | `partial` | Rows were obtained, but some pages failed |
+
+Every successful run writes a `<out>.meta.json` sidecar with `status`,
+`stop_reason` (for a complete run: `site_last_page`, `no_new_rows`,
+`requested_pages_done` or `single_product`; otherwise the cause),
+`pages_completed`, `failed_pages` (a blocked, not-found or unreadable page
+is listed there and never counted as completed), `price_confirmed_pct` and,
+for CSV, `csv_cells_escaped`. A run with no rows writes no sidecar and no
+output at all, so it can never overwrite a previous good run
+(`--allow-empty` opts out of that guard).
+
+Output files are written atomically (a temporary file in the same
+directory, renamed into place), so an interrupted run leaves the previous
+file intact. A new file gets the mode your umask gives it; an existing one
+keeps its own mode.
+
+**CSV formula cells**: a text cell starting with `=`, `+`, `-`, `@`, a tab
+or a line break gets a leading `'` in the CSV, so a spreadsheet shows it as
+text instead of running it as a formula. Numbers are never changed, the
+JSON output keeps the original text, and the sidecar's `csv_cells_escaped`
+says how many cells were changed.
 
 ## Engines
 
@@ -191,11 +215,17 @@ three agree on exit codes and the `Product` schema via the shared
 ## Known limitations
 
 - **Captcha token injection on a locally-launched browser is not
-  implemented.** `captcha_solver.solve_when_blocked()` detects a widget,
-  decides whether solving is actually warranted (never when products are
-  already rendered), and returns a solved token from 2Captcha — but
-  injecting that token into the page is widget/site-specific, and no real
-  StockX challenge was ever observed to verify an injector against. Over
+  implemented, so the local engines buy no solves.** `captcha_solver`
+  detects a widget and decides whether it gates the page (never when
+  products are already rendered); such a page is reported as blocked
+  (exit 3). Injecting a token is widget/site-specific, and no real StockX
+  challenge was ever observed to verify an injector against, so no engine
+  passes `can_use_token=True` and no `createTask` is ever sent — a token
+  nothing injects cannot change the outcome, it only costs money. Should
+  injection be added, every purchase goes through a per-page `SolveBudget`
+  claimed before the purchase. `--twocaptcha-key` is still accepted, and
+  `--captcha-api`, `--min-score` and `--solve-captcha always` (which acts
+  like `when-blocked`) currently change nothing. Over
   `--cdp-endpoint` (the Scraping Browser API), this doesn't matter:
   2Captcha's own `Captcha.setAutoSolve` CDP domain detects, solves and
   injects entirely inside their infrastructure (wired up in
@@ -288,9 +318,9 @@ three agree on exit codes and the `Product` schema via the shared
   terminal (not a sandboxed one), or GitHub Actions once this is pushed —
   to get a real answer.
 - **Captcha solving itself was never exercised against a real challenge.**
-  No CAPTCHA was ever shown during this project's own testing (plain
-  headless Chromium, no key, cleared stockx.com's Cloudflare checks
-  every time — see "What was actually measured"), so there was nothing
+  No CAPTCHA was ever shown during this project's own testing (on
+  2026-09-10 plain headless Chromium cleared stockx.com's checks; later
+  refusals were a static WAF 403 with no captcha), so there was nothing
   real to solve, even with a working key in hand — the classic
   `createTask`/`getTaskResult` flow is only verified against its error
   paths and a valid-key no-op (`getBalance`), not an actual solve.
@@ -309,6 +339,12 @@ driver import behind a module-level `try/except ImportError`, and
 `smoke_test.py` asserts that guard exists via an AST check — a lazily-done
 import inside the launch path would let the module "pass" without ever
 proving the guard works).
+
+**Canary**: `canary.yml` runs daily through the Scraping Browser API and
+needs the `STOCKX_CDP_ENDPOINT` repository secret. Without it the canary
+**fails** with an error naming the secret, rather than skipping green: a
+skipped canary has not tested the site. It also fails on exit 3/4/5/6,
+fewer than 20 rows or 3 pages, or rows missing their identity fields.
 
 **Testing against the live site, with real credentials**: see
 [`TESTING.md`](TESTING.md) — a step-by-step checklist for everything this

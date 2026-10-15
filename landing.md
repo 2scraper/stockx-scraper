@@ -28,7 +28,7 @@ An ordinary headless Chromium, run with no proxy and no 2Captcha key, cleared st
 
 | Product | What it's for |
 |---|---|
-| **Captcha solving — [2captcha.com](https://2captcha.com)** | Detects a challenge, decides whether it's actually blocking you (not just present), solves it |
+| **Captcha solving — [2captcha.com](https://2captcha.com)** | Detects a challenge and decides whether it's actually blocking you (not just present); solved in-session over `--cdp-endpoint` (a locally launched browser buys no solves, since it does not inject a token) |
 | **Scraping Browser API — 2captcha.com** | A remote browser session over CDP with its own proxy, fingerprint and captcha auto-solve bundled — `--cdp-endpoint` |
 | **Browser fingerprints — 2captcha Fingerprint API** | Pin a specific OS/browser/country fingerprint for a locally-launched browser |
 | **Proxies — 2captcha.com/proxy** (2prx.com is the same product, different name) | Drop credentials into `.env`, rotated automatically with per-exit failure tracking |

@@ -220,7 +220,7 @@
     <div class="addon-grid">
       <div class="addon">
         <h3>CAPTCHA SOLVING</h3>
-        <p>Broad detection, solves only when a page is actually gated — never just because a widget is present. Over <code>--cdp-endpoint</code>, wired into <code>Captcha.setAutoSolve</code>: detect, submit, solve, inject, all inside 2Captcha's own session.</p>
+        <p>Broad detection; a gated page is reported as blocked, never as empty, and a widget beside rendered products is ignored. Solving happens over <code>--cdp-endpoint</code>, through <code>Captcha.setAutoSolve</code>: detect, submit, solve, inject, all inside 2Captcha's own session. A locally launched browser buys no solves, because it does not inject a token.</p>
       </div>
       <div class="addon">
         <h3>SCRAPING BROWSER API</h3>

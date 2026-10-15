@@ -7,6 +7,62 @@ release means "fixes", not that every flag and default is frozen — a
 behaviour-changing default gets called out explicitly in its entry below
 rather than being a silent violation of that.
 
+## [Unreleased]
+
+> **Behaviour changes.**
+> - **Exit codes.** A served page whose rows cannot be read (the data block
+>   is missing, or the page reports results and none were parsed) now exits
+>   **5** with `status: parser_found_nothing`; it used to exit 4, "empty
+>   catalogue". A 404/410 for the requested address exits **5** with
+>   `status: not_found`; it used to exit 3, "blocked". Since #3, a run in
+>   which every page failed to load exits **5** (`fetch_failed`) instead of
+>   4; that change was not recorded here before.
+> - **A page blocked mid-run is a failed page.** It goes into
+>   `failed_pages` and is no longer counted in `pages_completed`.
+>   `stop_reason` now says why a complete run stopped (`site_last_page`,
+>   `no_new_rows`, `requested_pages_done`, `single_product`) or what went
+>   wrong, instead of repeating `status`.
+> - **No paid captcha solves are bought.** None of the engines injects a
+>   solver token into a locally launched browser, so the solve they used to
+>   buy could not change the outcome. A captcha page that gates the content
+>   now reads as blocked (exit 3) whether or not a key is set. Over
+>   `--cdp-endpoint` the Scraping Browser API still solves in-session.
+> - **Selenium and pyppeteer reject the values Playwright rejects**:
+>   `--retries -1` (it ran no navigation at all), `--pages 0`,
+>   `--concurrency 0` or negative, a negative `--delay`/`--retry-delay`, and
+>   (in all three engines) a negative `--proxy-block-retries` are now exit 2.
+> - **`--url` with `--category` is exit 2**, and a typed `--category` now
+>   wins over `STOCKX_URL` from the environment or `.env` (the environment
+>   URL used to replace it silently).
+> - **The canary fails without `STOCKX_CDP_ENDPOINT`** instead of skipping
+>   green, and fails on any exit other than 0.
+
+### Fixed
+
+- Output files and the sidecar are written atomically: a temporary file in
+  the same directory, fsynced and renamed into place. An interrupted write
+  used to truncate the previous good file. A new file gets
+  `0o666 & ~umask`; an existing file keeps its mode.
+- CSV cells starting with `=`, `+`, `-`, `@`, a tab or a line break get a
+  leading `'`, so a spreadsheet does not run them as formulas. Numbers and
+  the JSON output are unchanged; the sidecar records `csv_cells_escaped`.
+- A network error talking to the captcha solver is a warning, not a crash
+  (it used to end the run with exit 1).
+- The Selenium engine now honours `--proxy-rotate` (a fresh browser on the
+  next exit for each page); it was accepted and ignored.
+- Selenium and pyppeteer now recognise StockX's bot-guard page as blocked,
+  as Playwright already did.
+- The credential scan matches its skipped directories against the path
+  inside the repository, so a clone under a directory named `venv` is
+  scanned instead of reporting "ok, 0 files"; a scan of 0 files now fails.
+- `python3 env_config.py` no longer prints the first and last characters
+  of a secret, only its length.
+
+### Removed
+
+- `TwoCaptchaClient.scraping_browser_connection_url()`: nothing called it,
+  and the endpoint shape it built was never verified.
+
 ## [1.0.1] — 2026-09-16
 
 ### Added
@@ -14,7 +70,7 @@ rather than being a silent violation of that.
 - **`.github/ci_checks.py`** — one implementation of the credential, `--help`
   and sample-schema checks, invoked from **both** CI and the offline suite,
   plus a suite check asserting that the workflow calls it rather than
-  reimplementing it. CLAUDE.md §17 records what two implementations cost: in
+  reimplementing it. Two implementations of one check cost something: in
   three sibling repos the shipped script was invoked by nothing while
   `tests.yml` carried a narrower grep, and they disagreed in the direction
   that matters. Verified in both directions on 2026-09-17 — it passes on this
@@ -44,15 +100,15 @@ rather than being a silent violation of that.
   both directions. Measured 2026-09-17: **23 flags, identical across all
   three, no exceptions** — a stronger position than the rest of this family,
   where per-engine differences are documented and carried, so it is worth
-  pinning rather than leaving to drift. §20 records why this is written
-  before it is needed: a sibling's README promised "same CLI" while its
+  pinning rather than leaving to drift. It is written before it is needed
+  because a sibling's README promised "same CLI" while its
   primary engine had twelve flags its twins did not, nine of them predating
   the claim. The extractor counts only the argparse parser's own
   `add_argument` calls — `options.add_argument("--no-sandbox")` is a Chrome
   switch handed to chromedriver, not a flag of this tool, and counting those
   made Selenium look like it had three extra flags.
 - **A check that binds every call into a shared module against the callee's
-  real signature** (§17's check #1). It catches a call whose arguments do not
+  real signature**. It catches a call whose arguments do not
   fit and a call to a name the shared module does not define at all — both of
   which reach a live run as a crash on the first fetch while everything
   offline stays green. All three new checks are verified by control.

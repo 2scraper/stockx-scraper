@@ -2,7 +2,7 @@
 """fingerprint_client.py — 2Captcha Fingerprint API fetch + application.
 No site knowledge.
 
-Two rules, both from the family's invariants (CLAUDE.md §8):
+Two rules:
 
   - Never set a fingerprint over `--cdp-endpoint`. The Scraping Browser API
     brings its own device identity; stacking a second on top creates a

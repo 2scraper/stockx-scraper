@@ -4,8 +4,7 @@
 output_writer.finish_run). Selenium is not the primary engine (Playwright
 is); it exists for parity, not because it is preferred.
 
-Two hard engine limits, stated here rather than left to be discovered (see
-also the family CLAUDE.md §6):
+Two hard engine limits, stated here rather than left to be discovered:
 
   - Selenium CANNOT use an authenticated remote CDP endpoint.
     chromedriver's `debuggerAddress` takes a bare `host:port`; Playwright's
@@ -56,8 +55,8 @@ else:
 
 import env_config
 import product_parser as pp
-from captcha_solver import detect_from_html, solve_when_blocked
-from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, Product, finish_run, merge_pages, sku_key as _sku_key
+from captcha_solver import SolveBudget, solve_when_blocked
+from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, Product, RunFlags, finish_run, merge_pages, sku_key as _sku_key
 from proxy_pool import Proxy, ProxyPool, is_proxy_dead_error, load_proxies
 from scraper_api_client import TwoCaptchaClient
 
@@ -87,6 +86,31 @@ os.environ.setdefault("SE_AVOID_STATS", "true")
 log = logging.getLogger("selenium_scraper")
 
 
+def _positive_int(value: str) -> int:
+    """argparse type: rejects 0 and negative values (same as the Playwright
+    engine — the three engines accept the same values)."""
+    ivalue = int(value)
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer (got {value!r})")
+    return ivalue
+
+
+def _nonnegative_int(value: str) -> int:
+    """`--retries` counts EXTRA attempts, so 0 is legal (one navigation);
+    -1 used to mean zero navigations and a run that never fetched."""
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {value!r})")
+    return ivalue
+
+
+def _nonnegative_float(value: str) -> float:
+    fvalue = float(value)
+    if fvalue < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {value!r})")
+    return fvalue
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="stockx.com listing/product scraper — Selenium engine",
@@ -94,18 +118,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--url", default=None)
     p.add_argument("--category", default=None)
-    p.add_argument("--pages", type=int, default=1)
+    p.add_argument("--pages", type=_positive_int, default=1)
     p.add_argument("--format", choices=["json", "csv"], default="json")
     p.add_argument("--out", default=None)
-    p.add_argument("--delay", type=float, default=1.5)
-    p.add_argument("--retries", type=int, default=2)
-    p.add_argument("--retry-delay", type=float, default=3.0)
-    p.add_argument("--concurrency", type=int, default=1)
+    p.add_argument("--delay", type=_nonnegative_float, default=1.5)
+    p.add_argument("--retries", type=_nonnegative_int, default=2)
+    p.add_argument("--retry-delay", type=_nonnegative_float, default=3.0)
+    p.add_argument("--concurrency", type=_positive_int, default=1)
     p.add_argument("--proxy", default=None)
     p.add_argument("--proxy-file", default=None)
     p.add_argument("--proxy-rotate", action="store_true")
     p.add_argument("--proxy-shuffle", action="store_true")
-    p.add_argument("--proxy-block-retries", type=int, default=3)
+    p.add_argument("--proxy-block-retries", type=_nonnegative_int, default=3)
     p.add_argument("--twocaptcha-key", default=None)
     p.add_argument("--captcha-api", default=None)
     p.add_argument("--solve-captcha", choices=["off", "when-blocked", "always"], default="when-blocked")
@@ -225,112 +249,140 @@ def _fetch(driver, url: str, *, retries: int, retry_delay: float,
     return None, None, last_error
 
 
-def _maybe_solve_captcha(*, html: str, url: str, client: Optional[TwoCaptchaClient], policy: str) -> Optional[dict]:
-    if policy == "off" or client is None:
+# Solver outcomes that mean "a captcha gates this page and nothing cleared
+# it". Combined with zero product links, the page is blocked.
+_UNCLEARED_CAPTCHA = ("warning_no_key", "warning_solver_error", "detected_unidentified_widget",
+                      "detected_not_solved", "budget_exhausted")
+
+
+def _maybe_solve_captcha(*, html: str, url: str, client: Optional[TwoCaptchaClient], policy: str,
+                         budget: SolveBudget) -> Optional[dict]:
+    """Detection always runs (it is free); a paid solve never does here.
+    Selenium cannot open the authenticated CDP session the Scraping Browser
+    API's own solver needs, and this engine does not inject a token into
+    the page (that step is widget-specific and unverified), so
+    `can_use_token=False` and no solve is bought."""
+    if policy == "off":
         return None
-    result = solve_when_blocked(client=client, page_url=url, html=html, count_product_links=pp.count_product_links)
+    result = solve_when_blocked(client=client, page_url=url, html=html, count_product_links=pp.count_product_links,
+                                budget=budget, can_use_token=False)
     action = result.get("action")
-    if action == "warning_no_key":
-        log.warning("Captcha solving skipped: %s", result.get("detail"))
-    elif action == "warning_solver_error":
-        log.warning("Captcha solve failed: %s", result.get("detail"))
-    elif action == "solved":
-        # Selenium has no equivalent to the Scraping Browser API's own
-        # Captcha.setAutoSolve CDP domain (that requires an authenticated
-        # CDP session, which Selenium cannot open at all — see module
-        # docstring). A token IS obtained here but is NOT injected into
-        # the page: doing that would mean guessing this widget's own
-        # callback, which this codebase declines to do without a real
-        # captcha instance to verify against (see captcha_solver.py).
-        log.warning(
-            "Captcha token obtained but NOT auto-injected on the Selenium "
-            "engine (unverified widget-specific step) — use "
-            "playwright_scraper.py or puppeteer_scraper.py with "
-            "--cdp-endpoint for the Scraping Browser API's built-in solve."
-        )
+    if action == "detected_not_solved":
+        log.warning("A %s captcha gates this page. No solve was bought: the Selenium engine does "
+                    "not inject a solver token — use playwright_scraper.py or puppeteer_scraper.py "
+                    "with --cdp-endpoint for the Scraping Browser API's in-session solve.",
+                    result.get("captcha_type"))
+    elif action == "detected_unidentified_widget":
+        log.warning("A captcha-like marker was detected but no known widget/sitekey could be extracted.")
     return result
+
+
+def _captcha_blocks(result: Optional[dict], html: str) -> bool:
+    return bool(result) and result.get("action") in _UNCLEARED_CAPTCHA and pp.count_product_links(html) == 0
 
 
 def scrape_listing(
     *, args: argparse.Namespace, start_url: str,
     proxy_pool: Optional[ProxyPool], client: Optional[TwoCaptchaClient],
-) -> Tuple[List[List[Product]], List[int], bool, bool]:
+) -> Tuple[List[List[Product]], List[int], RunFlags]:
+    """Mirrors playwright_scraper.scrape_listing: (pages_products,
+    failed_pages, flags); a page counts as completed only when it was
+    served AND parsed."""
     pages_products: List[List[Product]] = []
     failed_pages: List[int] = []
-    blocked = False
+    flags = RunFlags()
 
     proxy = proxy_pool.next() if proxy_pool else None
     log.info("Using proxy %s", proxy.masked() if proxy else "(no local proxy pool — direct connection, or a --cdp-endpoint session providing its own exit)")
     driver = _build_driver(headless=args.headless, proxy=proxy, cdp_endpoint=None)
 
-    def fetch_page(n: int) -> Optional[str]:
-        nonlocal blocked
+    def fetch_page(n: int, drv, cur_proxy: Optional[Proxy]):
+        """Returns the parsed listing, or None after recording the page as
+        failed and its cause in `flags`. Thread-safe enough for the worker
+        pool: list.append and attribute stores are atomic under the GIL."""
         url = pp.page_url(start_url, n)
-        html, status, error = _fetch(driver, url, retries=args.retries, retry_delay=args.retry_delay,
-                                      proxy_pool=proxy_pool, current_proxy=proxy)
+        budget = SolveBudget()  # one per page, created before any retry
+        html, status, error = _fetch(drv, url, retries=args.retries, retry_delay=args.retry_delay,
+                                     proxy_pool=proxy_pool, current_proxy=cur_proxy)
         if html is None:
             log.error("Page %d permanently failed: %s", n, error)
             failed_pages.append(n)
             return None
-        if status is not None and status >= 400:
-            log.warning("Page %d returned HTTP %d — treating as blocked, not empty.", n, status)
-            blocked = True
         if args.dump_html:
             Path(_dump_path(args.out, n)).write_text(html, encoding="utf-8")
-        if detect_from_html(html, pp.APP_ERROR_MARKERS):
-            blocked = True
-        _maybe_solve_captcha(html=html, url=url, client=client, policy=args.solve_captcha)
-        return html
-
-    def safe_parse(n: int, html_text: str):
-        """Mirrors playwright_scraper.py's safe_parse: `_fetch()` already
-        contains every NETWORK-level failure, but an unexpected exception
-        INSIDE parsing had no equivalent containment and would crash the
-        whole run via run()'s outer `except Exception`, discarding every
-        already-collected page — see playwright_scraper.py's docstring for
-        the live reproduction and the CLAUDE.md §10 checklist item this
-        closes. Here the concurrent path is a ThreadPoolExecutor, not
-        asyncio, but the same gap applied identically: an unhandled
-        exception in a worker thread's `pool.map()` call re-raises in the
-        main thread the moment its result is consumed, which is exactly
-        this function's caller."""
-        try:
-            return pp.parse_listing_page(html_text, requested_url=start_url)
-        except Exception as exc:  # noqa: BLE001 — see docstring above
-            log.error("Page %d fetched OK but failed to parse — treating as failed, not crashing: %s", n, exc)
+        state = pp.classify_served_page(html, status)
+        if state == "ok":
+            captcha_result = _maybe_solve_captcha(html=html, url=url, client=client,
+                                                  policy=args.solve_captcha, budget=budget)
+            if _captcha_blocks(captcha_result, html):
+                state = "blocked"
+        if state == "blocked":
+            log.warning("Page %d is a block page (HTTP %s) — recorded as failed, not empty.", n, status)
+            flags.blocked = True
             failed_pages.append(n)
             return None
+        if state == "not_found":
+            log.warning("Page %d answered HTTP %s — the address does not exist.", n, status)
+            flags.not_found = True
+            failed_pages.append(n)
+            return None
+        try:
+            listing = pp.parse_listing_page(html, requested_url=start_url)
+        except Exception as exc:  # noqa: BLE001
+            # An unexpected exception INSIDE parsing must not crash the run
+            # and discard every page already collected (in a worker thread
+            # it would re-raise in the main thread when pool.map's result is
+            # consumed). One bad page degrades the run to partial.
+            log.error("Page %d fetched OK but failed to parse — treating as failed, not crashing: %s", n, exc)
+            flags.parser_failed = True
+            failed_pages.append(n)
+            return None
+        if listing.parser_failed:
+            if pp.has_challenge_marker(html):
+                log.warning("Page %d is a Cloudflare interstitial — recorded as blocked.", n)
+                flags.blocked = True
+            else:
+                log.error("Page %d was served but no rows could be read (data block found: %s, "
+                          "rows the page reports: %s) — a parser failure, not an empty listing.",
+                          n, listing.data_found, listing.total)
+                flags.parser_failed = True
+            failed_pages.append(n)
+            return None
+        return listing
 
-    html = fetch_page(1)
+    listing = fetch_page(1, driver, proxy)
     reported_page_count = None
     seen_skus: set = set()
-    if html is not None:
-        listing = safe_parse(1, html)
-        if listing is not None:
-            pages_products.append(listing.products)
-            seen_skus.update(_sku_key(p) for p in listing.products)
-            reported_page_count = listing.page_count
-            if not listing.products and listing.page is None and detect_from_html(html, pp.BOT_CHALLENGE_MARKERS):
-                blocked = True
+    if listing is not None:
+        pages_products.append(listing.products)
+        seen_skus.update(_sku_key(p) for p in listing.products)
+        reported_page_count = listing.page_count
 
     total_pages = args.pages
-    if reported_page_count is not None:
-        total_pages = min(total_pages, reported_page_count)
-    remaining = list(range(2, total_pages + 1))
+    if reported_page_count is not None and reported_page_count < total_pages:
+        total_pages = reported_page_count
+        flags.stop_reason = "site_last_page"
+    else:
+        flags.stop_reason = "requested_pages_done"
+    remaining = list(range(2, total_pages + 1)) if listing is not None else []
 
     if remaining:
         if args.concurrency <= 1:
             for n in remaining:
+                if getattr(args, "proxy_rotate", False) and proxy_pool is not None:
+                    # A rotation is a fresh browser: chromedriver's
+                    # --proxy-server is fixed at launch.
+                    driver.quit()
+                    proxy = proxy_pool.next()
+                    driver = _build_driver(headless=args.headless, proxy=proxy, cdp_endpoint=None)
                 time.sleep(args.delay)
-                html = fetch_page(n)
-                if html is None:
-                    continue
-                listing = safe_parse(n, html)
+                listing = fetch_page(n, driver, proxy)
                 if listing is None:
                     continue
                 pages_products.append(listing.products)
                 page_skus = {_sku_key(p) for p in listing.products}
                 if page_skus <= seen_skus:
+                    flags.stop_reason = "no_new_rows"
                     break  # data-based termination: this page added no NEW sku
                 seen_skus |= page_skus
         else:
@@ -339,79 +391,72 @@ def scrape_listing(
             results: dict = {}
 
             def worker(n: int, worker_index: int):
-                nonlocal blocked
                 worker_proxy = proxy_pool.worker_view(worker_index, args.concurrency).next() if proxy_pool else None
                 worker_driver = _build_driver(headless=args.headless, proxy=worker_proxy, cdp_endpoint=None)
                 try:
-                    html, status, _ = _fetch(worker_driver, pp.page_url(start_url, n), retries=args.retries,
-                                              retry_delay=args.retry_delay, proxy_pool=proxy_pool, current_proxy=worker_proxy)
-                    if status is not None and status >= 400:
-                        log.warning("Page %d returned HTTP %d — treating as blocked, not empty.", n, status)
-                        blocked = True
-                    if html is not None:
-                        if args.dump_html:
-                            Path(_dump_path(args.out, n)).write_text(html, encoding="utf-8")
-                        if detect_from_html(html, pp.APP_ERROR_MARKERS):
-                            blocked = True
-                        _maybe_solve_captcha(html=html, url=pp.page_url(start_url, n), client=client, policy=args.solve_captcha)
-                        listing = safe_parse(n, html)
-                        if listing is not None:
-                            results[n] = listing.products
-                    else:
-                        failed_pages.append(n)
+                    worker_listing = fetch_page(n, worker_driver, worker_proxy)
+                    if worker_listing is not None:
+                        results[n] = worker_listing.products
                 finally:
                     worker_driver.quit()
 
             # `worker(n, worker_index)` wants (real page number, loop index)
-            # in that order — the SAME order playwright_scraper.py and
-            # puppeteer_scraper.py pass to their own `worker(n, i)`.
-            # `enumerate(remaining)` yields (index, page_number), so passing
-            # that tuple straight into `worker(*item)` fed it BACKWARDS:
-            # `n` received the loop index (0, 1, 2…) instead of the real
-            # page number, and `worker_index` received the real page number
-            # instead of the index. Live-reproduced 2026-09-14: with
-            # `remaining == [2, 3]` this fetched `page_url(start_url, 0)`
-            # and `page_url(start_url, 1)` — page 0 doesn't exist and page 1
-            # was already fetched — instead of the intended pages 2 and 3,
-            # and threw off proxy_pool.worker_view's rotation the same way.
+            # in that order — the SAME order the other two engines pass.
+            # `enumerate(remaining)` yields (index, page_number); passing that
+            # tuple straight in once fed it BACKWARDS and fetched page 0 and
+            # page 1 instead of 2 and 3 (live-reproduced 2026-09-14).
             with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
                 list(pool.map(lambda item: worker(*item), ((n, i) for i, n in enumerate(remaining))))
             for n in sorted(results):
                 pages_products.append(results[n])
 
     driver.quit()
-    return pages_products, failed_pages, blocked, False
+    return pages_products, failed_pages, flags
 
 
 def scrape_single_product(
     *, args: argparse.Namespace, url: str,
     proxy_pool: Optional[ProxyPool], client: Optional[TwoCaptchaClient],
-) -> Tuple[List[Product], bool, bool]:
+) -> Tuple[List[Product], List[int], RunFlags]:
+    flags = RunFlags(stop_reason="single_product")
     proxy = proxy_pool.next() if proxy_pool else None
     log.info("Using proxy %s", proxy.masked() if proxy else "(no local proxy pool — direct connection, or a --cdp-endpoint session providing its own exit)")
     driver = _build_driver(headless=args.headless, proxy=proxy, cdp_endpoint=None)
-    html, status, error = _fetch(driver, url, retries=args.retries, retry_delay=args.retry_delay,
-                                  proxy_pool=proxy_pool, current_proxy=proxy)
-    blocked = False
-    if html is None:
+    budget = SolveBudget()
+    try:
+        html, status, error = _fetch(driver, url, retries=args.retries, retry_delay=args.retry_delay,
+                                     proxy_pool=proxy_pool, current_proxy=proxy)
+        if html is None:
+            log.error("Single-product fetch failed: %s", error)
+            return [], [1], flags
+        if args.dump_html:
+            Path(_dump_path(args.out, 1)).write_text(html, encoding="utf-8")
+        state = pp.classify_served_page(html, status)
+        if state == "ok":
+            captcha_result = _maybe_solve_captcha(html=html, url=url, client=client,
+                                                  policy=args.solve_captcha, budget=budget)
+            if _captcha_blocks(captcha_result, html):
+                state = "blocked"
+    finally:
         driver.quit()
-        log.error("Single-product fetch failed: %s", error)
-        return [], False, True
-    if status is not None and status >= 400:
-        log.warning("Product page returned HTTP %d — treating as blocked, not empty.", status)
-        blocked = True
-    if args.dump_html:
-        Path(_dump_path(args.out, 1)).write_text(html, encoding="utf-8")
-    if detect_from_html(html, pp.APP_ERROR_MARKERS):
-        blocked = True
-    _maybe_solve_captcha(html=html, url=url, client=client, policy=args.solve_captcha)
+    if state == "blocked":
+        log.warning("Product page is a block page (HTTP %s) — treating as blocked, not empty.", status)
+        flags.blocked = True
+        return [], [1], flags
+    if state == "not_found":
+        log.warning("Product page answered HTTP %s — no such product at %s.", status, url)
+        flags.not_found = True
+        return [], [1], flags
     product = pp.parse_product_detail(html, requested_url=url)
-    driver.quit()
     if product is None:
-        if pp.count_product_links(html) == 0:
-            blocked = True
-        return [], blocked, False
-    return [product], blocked, False
+        if pp.has_challenge_marker(html) or pp.count_product_links(html) == 0:
+            flags.blocked = True
+        else:
+            log.error("Product page was served but neither JSON-LD nor GetProduct could be read — "
+                      "a parser failure, not a missing product.")
+            flags.parser_failed = True
+        return [], [1], flags
+    return [product], [], flags
 
 
 def run(args: argparse.Namespace) -> int:
@@ -466,14 +511,12 @@ def run(args: argparse.Namespace) -> int:
     try:
         single_mode = pp.is_single_product_url(start_url) and not pp.is_listing_url(start_url)
         if single_mode:
-            products, blocked, remote_api_error = scrape_single_product(
+            merged, failed_pages, flags = scrape_single_product(
                 args=args, url=start_url, proxy_pool=proxy_pool, client=client,
             )
-            pages_completed = 1 if products or not blocked else 0
-            failed_pages = [] if products or blocked else [1]
-            merged = products
+            pages_completed = 0 if failed_pages else 1
         else:
-            pages_products, failed_pages, blocked, remote_api_error = scrape_listing(
+            pages_products, failed_pages, flags = scrape_listing(
                 args=args, start_url=start_url, proxy_pool=proxy_pool, client=client,
             )
             merged = merge_pages(pages_products)
@@ -486,14 +529,18 @@ def run(args: argparse.Namespace) -> int:
     return finish_run(
         products=merged, out_path=args.out, fmt=args.format, engine=ENGINE_NAME, url=start_url,
         pages_requested=args.pages, pages_completed=pages_completed, failed_pages=failed_pages,
-        blocked=blocked, remote_api_error=remote_api_error, allow_empty=args.allow_empty,
+        blocked=flags.blocked, remote_api_error=flags.remote_api_error, not_found=flags.not_found,
+        parser_failed=flags.parser_failed, stop_reason=flags.stop_reason, allow_empty=args.allow_empty,
         started_at=started_at, price_confirmed_pct=price_confirmed_pct,
     )
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    args = build_arg_parser().parse_args()
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    if args.url and args.category:
+        parser.error("--url and --category both name the start page; pass one of them")
     args = env_config.apply_env(args)
     try:
         return run(args)
