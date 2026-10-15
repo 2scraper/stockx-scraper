@@ -55,7 +55,7 @@ else:
 
 import env_config
 import product_parser as pp
-from captcha_solver import SolveBudget, solve_when_blocked
+from captcha_solver import SolveBudget, add_captcha_arguments, solve_when_blocked
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, Product, RunFlags, finish_run, merge_pages, sku_key as _sku_key
 from proxy_pool import Proxy, ProxyPool, is_proxy_dead_error, load_proxies
 from scraper_api_client import TwoCaptchaClient
@@ -131,9 +131,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--proxy-shuffle", action="store_true")
     p.add_argument("--proxy-block-retries", type=_nonnegative_int, default=3)
     p.add_argument("--twocaptcha-key", default=None)
-    p.add_argument("--captcha-api", default=None)
-    p.add_argument("--solve-captcha", choices=["off", "when-blocked", "always"], default="when-blocked")
-    p.add_argument("--min-score", type=float, default=0.3)
+    add_captcha_arguments(p)
     p.add_argument("--cdp-endpoint", default=None,
                     help="NOTE: refused if it carries credentials — Selenium cannot authenticate a remote CDP session")
     p.add_argument("--allow-empty", action="store_true")

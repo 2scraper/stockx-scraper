@@ -112,8 +112,13 @@ places they genuinely can't behave the same as Playwright.
 
 `--url --category --pages --format --out --delay --retries --retry-delay
 --concurrency --proxy --proxy-file --proxy-rotate --proxy-shuffle
---proxy-block-retries --twocaptcha-key --captcha-api --solve-captcha
---min-score --cdp-endpoint --allow-empty --dump-html --headless/--headful`
+--proxy-block-retries --twocaptcha-key --solve-captcha {off,when-blocked}
+--cdp-endpoint --allow-empty --dump-html --headless/--headful`
+
+`--captcha-api`, `--min-score` and `--solve-captcha always` are refused with
+exit 2: this repository does not implement captcha-token injection, so they
+could only change nothing (see "Known limitations"). They are still parsed so
+that an old command line fails loudly instead of running as if they worked.
 
 Credentials belong in `.env` / `STOCKX_PROXY` / `TWOCAPTCHA_KEY` — never as
 literal `--proxy`/`--twocaptcha-key` text on a shared or logged command
@@ -144,7 +149,7 @@ for fabrication markers).
 |---|---|---|
 | `0` | `complete` | Every requested page was served and parsed |
 | `1` | — | Crash |
-| `2` | — | Bad usage (including a negative count, `--pages 0`, or `--url` with `--category`) |
+| `2` | — | Bad usage (including a negative count, `--pages 0`, `--url` with `--category`, or a captcha flag this repository does not implement: `--captcha-api`, `--min-score`, `--solve-captcha always`) |
 | `3` | `blocked` | stockx.com refused the session (an HTTP error other than 404/410, its bot-guard or error page, a Cloudflare interstitial, or a captcha nothing cleared) |
 | `4` | `empty` | The page's own data says there are zero results |
 | `5` | `fetch_failed` / `not_found` / `parser_found_nothing` / `remote_api_error` | No rows, and the requested content was never obtained: the page never loaded, the address answered 404/410, or the page was served but its rows could not be read (a page-shape change, not an empty catalogue) |
@@ -223,9 +228,10 @@ three agree on exit codes and the `Product` schema via the shared
   passes `can_use_token=True` and no `createTask` is ever sent — a token
   nothing injects cannot change the outcome, it only costs money. Should
   injection be added, every purchase goes through a per-page `SolveBudget`
-  claimed before the purchase. `--twocaptcha-key` is still accepted, and
-  `--captcha-api`, `--min-score` and `--solve-captcha always` (which acts
-  like `when-blocked`) currently change nothing. Over
+  claimed before the purchase. `--twocaptcha-key` is still accepted, but
+  the engines send nothing with it today. `--captcha-api`,
+  `--min-score` and `--solve-captcha always` used to be accepted and change
+  nothing; they are now refused with exit 2 and a message saying so. Over
   `--cdp-endpoint` (the Scraping Browser API), this doesn't matter:
   2Captcha's own `Captcha.setAutoSolve` CDP domain detects, solves and
   injects entirely inside their infrastructure (wired up in
