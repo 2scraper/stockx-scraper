@@ -9,6 +9,8 @@ rather than being a silent violation of that.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-10-15
+
 > **Behaviour changes.**
 > - **Exit codes.** A served page whose rows cannot be read (the data block
 >   is missing, or the page reports results and none were parsed) now exits
@@ -62,8 +64,6 @@ rather than being a silent violation of that.
 
 - `TwoCaptchaClient.scraping_browser_connection_url()`: nothing called it,
   and the endpoint shape it built was never verified.
-
-## [1.0.1] — 2026-09-16
 
 ### Added
 
