@@ -38,7 +38,7 @@ else:
 
 import env_config
 import product_parser as pp
-from captcha_solver import SolveBudget, solve_when_blocked
+from captcha_solver import SolveBudget, add_captcha_arguments, solve_when_blocked
 from fingerprint_client import refuse_if_cdp
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, Product, RunFlags, finish_run, merge_pages, sku_key as _sku_key
 from proxy_pool import Proxy, ProxyPool, is_proxy_dead_error, load_proxies, redact_credentials
@@ -101,9 +101,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--proxy-shuffle", action="store_true")
     p.add_argument("--proxy-block-retries", type=_nonnegative_int, default=3)
     p.add_argument("--twocaptcha-key", default=None, help="(or set TWOCAPTCHA_KEY)")
-    p.add_argument("--captcha-api", default=None, help="Override the 2Captcha API base URL (testing only)")
-    p.add_argument("--solve-captcha", choices=["off", "when-blocked", "always"], default="when-blocked")
-    p.add_argument("--min-score", type=float, default=0.3, help="Minimum acceptable reCAPTCHA v3 score")
+    add_captcha_arguments(p)
     p.add_argument("--cdp-endpoint", default=None, help="Connect to a remote CDP session (e.g. the 2Captcha Scraping Browser API) instead of launching locally (or set STOCKX_CDP_ENDPOINT)")
     p.add_argument("--allow-empty", action="store_true", help="Write output even if zero products were found")
     p.add_argument("--dump-html", action="store_true", help="Save each fetched page's HTML next to --out, on success too")

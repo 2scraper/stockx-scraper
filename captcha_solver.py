@@ -30,6 +30,7 @@ does it in its own driver's dialect.
 """
 from __future__ import annotations
 
+import argparse
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -71,6 +72,50 @@ _SITEKEY_PATTERNS = {
 # query param instead of a data-sitekey attribute.
 _RECAPTCHA_V3_LOADER_RE = re.compile(r"recaptcha/api\.js\?render=([\w-]+)")
 _RECAPTCHA_EXPLICIT_LOADER_RE = re.compile(r"recaptcha/api\.js\?render=explicit")
+
+
+# --------------------------------------------------------------------------- #
+# CLI flags. `--captcha-api`, `--min-score` and `--solve-captcha always` only
+# matter to a solve whose token is put into the page. No engine here injects
+# a solved token, so those flags could only change nothing; they stay
+# parseable for one release so an existing invocation gets a clear exit 2
+# (argparse's usage-error exit) instead of a silent no-op.
+# --------------------------------------------------------------------------- #
+NOT_IMPLEMENTED_REASON = (
+    "this repository does not implement captcha-token injection, so it would "
+    "change nothing; remove it from the command line"
+)
+SOLVE_CAPTCHA_POLICIES = ("off", "when-blocked")
+
+
+def _refuse_flag(flag: str):
+    def _type(value: str):
+        raise argparse.ArgumentTypeError(f"not implemented: {NOT_IMPLEMENTED_REASON}")
+    _type.__name__ = flag.lstrip("-").replace("-", "_")
+    return _type
+
+
+def _solve_captcha_policy(value: str) -> str:
+    if value == "always":
+        raise argparse.ArgumentTypeError(
+            f"'always' is not implemented: {NOT_IMPLEMENTED_REASON} "
+            f"(use 'when-blocked', the default, or 'off')")
+    return value
+
+
+def add_captcha_arguments(p: argparse.ArgumentParser) -> None:
+    """The captcha flags, identical in every engine."""
+    p.add_argument(
+        "--solve-captcha", type=_solve_captcha_policy, choices=SOLVE_CAPTCHA_POLICIES,
+        default="when-blocked",
+        help="when-blocked (default): detect a captcha and report a page it gates as blocked "
+             "; over --cdp-endpoint, the Playwright and pyppeteer engines also turn on "
+             "the Scraping Browser API's in-session solver. off: skip both. "
+             "'always' is refused with exit 2 (not implemented)")
+    p.add_argument("--captcha-api", type=_refuse_flag("--captcha-api"), default=None,
+                   help="Not implemented: refused with exit 2")
+    p.add_argument("--min-score", type=_refuse_flag("--min-score"), default=None,
+                   help="Not implemented: refused with exit 2")
 
 
 class SolveBudget:

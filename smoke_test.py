@@ -1670,6 +1670,35 @@ def _():
             assert argv[0] in err.getvalue(), f"{engine.__name__}: the error does not name {argv[0]}"
 
 
+@check("every engine: --captcha-api, --min-score and --solve-captcha always are refused with exit 2 (no token injection)")
+def _():
+    import contextlib
+    import io
+    for engine in _ENGINES:
+        parser = engine.build_arg_parser()
+        for argv in (["--captcha-api", "http://localhost:1"], ["--min-score", "0.7"], ["--solve-captcha", "always"]):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                try:
+                    parser.parse_args(_CATEGORY + argv)
+                    raise AssertionError(f"{engine.__name__} accepted {argv} although nothing implements it")
+                except SystemExit as exc:
+                    assert exc.code == 2, (engine.__name__, argv, exc.code)
+            text = err.getvalue()
+            assert argv[0] in text and "does not implement captcha-token injection" in text, (engine.__name__, argv, text)
+        # The implemented policies still parse, and the default is unchanged.
+        def parsed(argv):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                try:
+                    return parser.parse_args(_CATEGORY + argv)
+                except SystemExit as exc:
+                    raise AssertionError(f"{engine.__name__} refused {argv}: {err.getvalue().strip()}") from None
+        assert parsed([]).solve_captcha == "when-blocked", engine.__name__
+        for policy in ("off", "when-blocked"):
+            assert parsed(["--solve-captcha", policy]).solve_captcha == policy, (engine.__name__, policy)
+        code, _, _ = _engine_run(engine, _PRODUCT + ["--solve-captcha", "off"], lambda url: (200, _PRODUCT_HTML))
+        assert code == 0, f"{engine.__name__}: --solve-captcha off gave exit {code}"
+
+
 @check("selenium: --proxy-rotate gives each sequential page a fresh browser on the next exit")
 def _():
     built = []

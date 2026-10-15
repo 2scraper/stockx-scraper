@@ -9,6 +9,20 @@ rather than being a silent violation of that.
 
 ## [Unreleased]
 
+> **Behaviour change.** `--captcha-api`, `--min-score` and
+> `--solve-captcha always` are refused with exit 2 in every engine
+> (Playwright, Selenium, pyppeteer). No engine injects a solved captcha token
+> into the page, so these flags changed nothing while appearing to configure
+> a solve. The error names the flag and says that this repository does not
+> implement captcha-token injection. `--solve-captcha` now accepts
+> `when-blocked` (the default) and `off`; their behaviour is unchanged.
+
+### Changed
+- The captcha flags are defined once, in `captcha_solver.add_captcha_arguments`,
+  so the three engines cannot drift apart; `--help` marks the refused flags.
+- An offline check runs each engine's parser against each refused flag and
+  confirms that `off` and `when-blocked` still parse and run.
+
 ## [1.1.0] — 2026-10-15
 
 > **Behaviour changes.**
