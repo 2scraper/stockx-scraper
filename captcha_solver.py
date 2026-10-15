@@ -10,16 +10,23 @@ Policy, matching the family's hard-won rule that "detected != blocking":
   - A captcha WIDGET present on a page whose products are already rendered
     guards nothing and is not solved: `--solve-captcha when-blocked` (the
     default) only pays for a solve when `count_product_links(html) == 0`.
-  - A missing key or a solver-side error is a WARNING, never a crash — the
-    run continues, and only reports EXIT_BLOCKED if the page really was
-    gated (see output_writer.EXIT_BLOCKED).
+  - A missing key or a solver-side error (including a network error
+    talking to the solver) is a WARNING, never a crash — the run continues,
+    and only reports EXIT_BLOCKED if the page really was gated (see
+    output_writer.EXIT_BLOCKED).
+  - A paid solve is bought ONLY when the caller can use the token
+    (`can_use_token=True`) and the page's `SolveBudget` still has an
+    allowance — checked BEFORE the purchase. None of this repository's
+    engines injects a token into a locally launched browser today (that
+    step is widget-specific and no real StockX challenge has been seen to
+    verify one against), so every engine passes `can_use_token=False` and
+    no solve is bought: a token nobody injects cannot change the outcome,
+    it only costs money. Over `--cdp-endpoint` the Scraping Browser API
+    solves inside its own session instead.
 
 No JavaScript crosses this module's boundary: it hands back a plain
-(captcha_type, sitekey, token) triple. The engine — which already speaks
-its own driver's dialect (Playwright/Selenium/pyppeteer) — is the one that
-calls page.evaluate / execute_script to inject the token, because that is
-exactly the kind of per-engine primitive `page_flow.py`-style code should
-own instead of a shared module quietly picking one driver's dialect.
+(captcha_type, sitekey, token) triple. An engine that implements injection
+does it in its own driver's dialect.
 """
 from __future__ import annotations
 
@@ -64,6 +71,23 @@ _SITEKEY_PATTERNS = {
 # query param instead of a data-sitekey attribute.
 _RECAPTCHA_V3_LOADER_RE = re.compile(r"recaptcha/api\.js\?render=([\w-]+)")
 _RECAPTCHA_EXPLICIT_LOADER_RE = re.compile(r"recaptcha/api\.js\?render=explicit")
+
+
+class SolveBudget:
+    """Paid solves allowed for ONE page. Create one per page, before that
+    page's retry/rotation loop, and pass it to every solve call site for the
+    page: a retry or a fresh exit does not reset it, and `claim()` is called
+    before the purchase, never after."""
+
+    def __init__(self, allowance: int = 1):
+        self.allowance = allowance
+        self.spent = 0
+
+    def claim(self) -> bool:
+        if self.spent >= self.allowance:
+            return False
+        self.spent += 1
+        return True
 
 
 @dataclass
@@ -138,10 +162,12 @@ def _task_payload(signal: CaptchaSignal, page_url: str, *, proxyless: bool) -> d
 
 def solve_when_blocked(
     *,
-    client: TwoCaptchaClient,
+    client: Optional[TwoCaptchaClient],
     page_url: str,
     html: str,
     count_product_links: Callable[[str], int],
+    budget: SolveBudget,
+    can_use_token: bool,
     extra_markers: Sequence[str] = (),
     proxyless: bool = True,
 ) -> dict:
@@ -150,6 +176,9 @@ def solve_when_blocked(
     a page whose products are already rendered is not blocked, and running
     a 20s readiness wait first would burn it even when solving is what
     actually makes products appear on a page that IS gated.
+
+    `budget` and `can_use_token` are required, so no call site can buy a
+    solve without deciding both.
     """
     if not detect_from_html(html, extra_markers):
         return {"action": "no_captcha_detected"}
@@ -160,6 +189,13 @@ def solve_when_blocked(
     signal = identify_widget(html)
     if signal is None:
         return {"action": "detected_unidentified_widget"}
+
+    if not can_use_token or client is None:
+        # Detected and gated, but nothing here would inject a token: do not
+        # buy one.
+        return {"action": "detected_not_solved", "captcha_type": signal.captcha_type.value}
+    if not budget.claim():
+        return {"action": "budget_exhausted", "captcha_type": signal.captcha_type.value}
 
     try:
         task = _task_payload(signal, page_url, proxyless=proxyless)

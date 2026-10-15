@@ -91,10 +91,9 @@ BOT_CHALLENGE_MARKERS = (
 # app-level "Error" page instead of a Cloudflare challenge page. Neither
 # BOT_CHALLENGE_MARKERS string matched it, so `blocked` stayed False and
 # the run reported EXIT_ZERO_PRODUCTS ("this category is empty") for what
-# was actually a hard block — a wrong answer in the family's own terms
-# (§8: "missing content is one of three things, and they want three
-# different answers" — this is the fourth thing that was missing:
-# rejected-at-the-edge, not unpainted/lazy/wrong-session).
+# was actually a hard block. Missing content can mean not yet rendered,
+# lazily loaded, the wrong session, or — as here — rejected at the edge,
+# and each wants a different answer.
 # `id="__next_error__"` is the framework's own error-boundary root id, not
 # page copy, so it does not depend on wording that a redesign could change
 # as easily as the visible "Something went wrong" text would.
@@ -117,6 +116,38 @@ BOT_SITE_GUARD_MARKERS = (
     "error/bot-site-guard",
     "Please log in to verify you are not a bot",
 )
+
+# A 404/410 for the requested address is a statement about the ADDRESS (a
+# mistyped product slug, a category that no longer exists), not a block:
+# telling the reader to buy a proxy for it is the wrong answer. Ranked
+# below the bot-guard route, which is a block whatever status it carries.
+NOT_FOUND_STATUSES = (404, 410)
+
+
+def classify_served_page(html: str, status: Optional[int]) -> str:
+    """'blocked', 'not_found' or 'ok' for a page that WAS served (the
+    navigation returned HTML). Body markers first, then the HTTP status —
+    a 403/429/5xx is a hard fact from the server even when its body wording
+    is new. Used by every engine, so the three cannot disagree."""
+    lowered = html.lower()
+    if any(m.lower() in lowered for m in BOT_SITE_GUARD_MARKERS):
+        return "blocked"
+    if status in NOT_FOUND_STATUSES:
+        return "not_found"
+    if any(m.lower() in lowered for m in APP_ERROR_MARKERS):
+        return "blocked"
+    if status is not None and status >= 400:
+        return "blocked"
+    return "ok"
+
+
+def has_challenge_marker(html: str) -> bool:
+    """A Cloudflare interstitial. Only meaningful on a page that ALSO lacks
+    its data block: the ambient challenge-platform script ships on good
+    pages too, which is why it is not in BOT_CHALLENGE_MARKERS."""
+    lowered = html.lower()
+    return any(m.lower() in lowered for m in BOT_CHALLENGE_MARKERS)
+
 
 MIN_CARD_MATCHES = 2  # per family invariant: must be >1, or a single
                        # unrelated link resolves the "rendered" wait early.
@@ -265,6 +296,23 @@ class ListingPage:
     total: Optional[int]
     currency: Optional[str]
     flow: Optional[str]
+    # True only when the page's own `getDiscoveryData` query was found.
+    data_found: bool = False
+
+    @property
+    def parser_failed(self) -> bool:
+        """A served listing page that yielded no rows for a reason other
+        than "the listing is empty": the data block is missing (no
+        `__NEXT_DATA__` or no `getDiscoveryData` — a renamed query, a new
+        page shape), or the page's own `pageInfo.total` says rows exist and
+        none were read (a renamed `edges` key). Only a page whose own query
+        reports zero results is a genuine empty result. A block page also
+        lacks the data block; the engines check for that first."""
+        if self.products:
+            return False
+        if not self.data_found:
+            return True
+        return (self.total or 0) > 0
 
 
 def _num(node: Optional[dict], *path: str) -> Optional[float]:
@@ -356,13 +404,15 @@ def parse_listing_page(html: str, *, requested_url: str) -> ListingPage:
             continue
         products.append(parse_listing_node(node, currency=currency, category_label=category_label))
 
+    total = page_info.get("total")
     return ListingPage(
         products=products,
         page=page_info.get("page"),
         page_count=page_info.get("pageCount"),
-        total=page_info.get("total"),
+        total=total if isinstance(total, int) else None,
         currency=currency,
         flow=flow,
+        data_found=True,
     )
 
 
@@ -439,8 +489,8 @@ def parse_product_detail(html: str, *, requested_url: str) -> Optional[Product]:
         return None
 
     # --- price: JSON-LD AggregateOffer is the structured, schema-legal
-    # source. Defend against the legal-but-awkward shapes noted in the
-    # family CLAUDE.md even though none were observed live on stockx.com,
+    # source. Defend against the legal-but-awkward shapes schema.org allows
+    # (a list of offers, a single Offer) even though none were observed live on stockx.com,
     # since a different vertical (apparel/collectibles/mystery boxes) may
     # render a different Offer shape than the sneaker page this was
     # verified against.

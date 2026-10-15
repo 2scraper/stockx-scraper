@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """output_writer.py — the row model, JSON/CSV writer, dedupe, exit codes,
 and run metadata. Carries (almost) no site knowledge: everything here is
-part of the family's shared output CONTRACT, described in the family
-CLAUDE.md — diverging from it needs a written reason, not a per-site tweak.
+the output CONTRACT every engine shares (exit codes, sidecar fields, the
+"never overwrite good output with an empty run" guard) — diverging from it
+needs a written reason, not a per-site tweak.
 """
 from __future__ import annotations
 
+import contextlib
 import csv
 import json
+import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields
-from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 # --------------------------------------------------------------------------- #
 # Exit codes — identical across playwright_scraper / selenium_scraper /
@@ -25,10 +28,12 @@ EXIT_BLOCKED = 3
 EXIT_ZERO_PRODUCTS = 4
 EXIT_REMOTE_API_ERROR = 5
 # The same code, under the name the rest of this family uses for it as of
-# 2026-09-21. 5 means "the content was never obtained" — a remote API error
-# is one way for that to happen and a dead proxy or a load timeout is
-# another, and a caller driving several of these scrapers should not need a
-# per-repo table to learn that. See CLAUDE.md §25.
+# 2026-09-21. 5 means "the requested content was never obtained" — a remote
+# API error is one way for that to happen; a dead proxy, a load timeout, a
+# 404 for the requested address and a served page the parser could not read
+# are others. A caller driving several of these scrapers should not need a
+# per-repo table to learn that; the sidecar's `status`/`stop_reason` say
+# which one it was.
 EXIT_FETCH_FAILED = EXIT_REMOTE_API_ERROR
 EXIT_PARTIAL = 6
 
@@ -40,6 +45,20 @@ STATUS_BY_EXIT = {
     EXIT_ZERO_PRODUCTS: "empty",
     EXIT_REMOTE_API_ERROR: "remote_api_error",
     EXIT_PARTIAL: "partial",
+}
+
+# Every status finish_run() can report, with its exit code. STATUS_BY_EXIT
+# above keeps one name per code for older callers; this is the full list,
+# because exit 5 has several distinct causes and the sidecar names which.
+EXIT_BY_STATUS = {
+    "complete": EXIT_OK,
+    "blocked": EXIT_BLOCKED,
+    "empty": EXIT_ZERO_PRODUCTS,
+    "remote_api_error": EXIT_FETCH_FAILED,
+    "fetch_failed": EXIT_FETCH_FAILED,
+    "not_found": EXIT_FETCH_FAILED,
+    "parser_found_nothing": EXIT_FETCH_FAILED,
+    "partial": EXIT_PARTIAL,
 }
 
 
@@ -89,6 +108,20 @@ class Product:
 PRODUCT_FIELD_NAMES: List[str] = [f.name for f in fields(Product)]
 
 
+@dataclass
+class RunFlags:
+    """What a scrape learned besides its rows, handed from an engine to
+    finish_run(). One object instead of loose booleans so the three engines
+    cannot each grow their own subset."""
+    blocked: bool = False
+    not_found: bool = False
+    parser_failed: bool = False
+    remote_api_error: bool = False
+    # Why a run that finished normally stopped: "site_last_page",
+    # "no_new_rows", "requested_pages_done" or "single_product".
+    stop_reason: Optional[str] = None
+
+
 # --------------------------------------------------------------------------- #
 # Dedupe / merge — "merge in page order, not arrival order": the caller
 # passes pages already sorted by page number (or, for a concurrent run,
@@ -118,26 +151,110 @@ def merge_pages(pages: Sequence[Sequence[Product]]) -> List[Product]:
 # --------------------------------------------------------------------------- #
 # Writers
 # --------------------------------------------------------------------------- #
+@contextlib.contextmanager
+def _atomic(path: str, newline: Optional[str] = None):
+    """Write to a temporary file beside `path`, then rename it over `path`.
+
+    `open(path, "w")` truncates before a byte is written, so a crash, a kill
+    or a full disk halfway through `json.dump` left a SHORTER file where a
+    complete one was — the previous good run destroyed by the attempt to
+    replace it (reproduced 2026-10-14: a 497-byte good file became 2 bytes
+    of invalid JSON).
+
+    * The temp file lives in the target's own directory: `os.replace` is
+      atomic only within one filesystem.
+    * `fsync` before the rename makes the bytes durable, not just visible.
+    * `newline` is passed through because the csv module needs `newline=""`.
+    * Mode: an existing target keeps its own mode (someone may have
+      tightened it on purpose); a new one gets `0o666 & ~umask`, exactly
+      what `open()` gave it before. `NamedTemporaryFile` creates at 0600
+      and `os.replace` keeps that, so without the chmod every output would
+      silently become owner-only.
+    * On any failure, including KeyboardInterrupt, the temp file is removed
+      and the target is left untouched.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline=newline, dir=directory,
+        prefix=os.path.basename(path) + ".", suffix=".tmp", delete=False)
+    try:
+        with handle:
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(handle.name, mode)
+        os.replace(handle.name, path)
+    except BaseException:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
+# A spreadsheet reads a cell starting with one of these as a FORMULA, and
+# every string in these rows (title, brand, colorway) was written by whoever
+# listed the product. Tab/CR/LF are included because some readers strip a
+# leading one and then evaluate what follows.
+CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r", "\n")
+# Excel, Sheets and LibreOffice read a leading apostrophe as "text" and do
+# not display it; a `csv`-module consumer does see it, which is why the
+# count goes into the sidecar as `csv_cells_escaped`.
+CSV_FORMULA_ESCAPE = "'"
+
+
+def _csv_escape(value: Any):
+    """(value, was_escaped). Strings only: a negative `price` stays a number,
+    so sums over the column still work. CSV only: the JSON output keeps the
+    site's text exactly as served."""
+    if isinstance(value, str) and value.startswith(CSV_FORMULA_LEADS):
+        return CSV_FORMULA_ESCAPE + value, True
+    return value, False
+
+
+def _csv_value(value: Any) -> Any:
+    # No Product field is a list or dict today; serialise one the same way
+    # JSON would rather than writing Python's repr(), and do it BEFORE the
+    # formula check so a serialised cell is checked too.
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
 def write_json(products: Sequence[Product], out_path: str) -> None:
-    with open(out_path, "w", encoding="utf-8") as f:
+    with _atomic(out_path) as f:
         json.dump([asdict(p) for p in products], f, ensure_ascii=False, indent=2)
 
 
-def write_csv(products: Sequence[Product], out_path: str) -> None:
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
+def write_csv(products: Sequence[Product], out_path: str) -> int:
+    """Returns how many cells were formula-escaped."""
+    escaped = 0
+    with _atomic(out_path, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=PRODUCT_FIELD_NAMES)
         writer.writeheader()  # written even for zero rows — a consumer reads
         for p in products:    # an empty table, not a zero-byte file.
-            writer.writerow(asdict(p))
+            row = {}
+            for key, value in asdict(p).items():
+                row[key], was_escaped = _csv_escape(_csv_value(value))
+                escaped += was_escaped
+            writer.writerow(row)
+    return escaped
 
 
-def write_output(products: Sequence[Product], out_path: str, fmt: str) -> None:
+def write_output(products: Sequence[Product], out_path: str, fmt: str) -> Optional[int]:
+    """Returns the CSV escape count for a CSV write, None for JSON."""
     if fmt == "json":
         write_json(products, out_path)
-    elif fmt == "csv":
-        write_csv(products, out_path)
-    else:
-        raise ValueError(f"Unsupported format: {fmt!r} (expected 'json' or 'csv')")
+        return None
+    if fmt == "csv":
+        return write_csv(products, out_path)
+    raise ValueError(f"Unsupported format: {fmt!r} (expected 'json' or 'csv')")
 
 
 # --------------------------------------------------------------------------- #
@@ -178,9 +295,8 @@ def write_meta(
     }
     if extra:
         meta.update(extra)
-    Path(meta_path_for(out_path)).write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    with _atomic(meta_path_for(out_path)) as f:
+        f.write(json.dumps(meta, ensure_ascii=False, indent=2))
 
 
 # --------------------------------------------------------------------------- #
@@ -205,68 +321,78 @@ def finish_run(
     started_at: float,
     price_confirmed_pct: Optional[float] = None,
     extra_meta: Optional[dict] = None,
+    not_found: bool = False,
+    parser_failed: bool = False,
+    stop_reason: Optional[str] = None,
 ) -> int:
     """Decide status/exit code, write output + sidecar (or neither), return
     the process exit code. NEVER writes a sidecar for a failed run, and
     NEVER overwrites a previous good output with an empty one unless the
-    caller explicitly passed --allow-empty."""
-    failed_pages = failed_pages or []
-    partial = bool(failed_pages) and pages_completed > 0
+    caller explicitly passed --allow-empty.
+
+    `not_found`: the requested address answered 404/410 (no block page).
+    `parser_failed`: a page was served, but the parser could not read rows
+    the page itself says exist (or its data block was missing). Neither is
+    an empty catalogue, so neither may report exit 4.
+    `stop_reason`: why a COMPLETE run stopped paginating (e.g.
+    `site_last_page`); for every other status the cause is recorded instead.
+    """
+    failed_pages = sorted(set(failed_pages or []))
     zero_products = len(products) == 0
     # Pages were attempted and NONE completed: the content was never
     # obtained, which is a different fact from "we read the listing and it
-    # held nothing". `partial` deliberately excludes this case (it requires
-    # pages_completed > 0), so without this it fell through to
-    # EXIT_ZERO_PRODUCTS and told a pipeline the catalogue was empty on a
-    # run that never reached the site.
+    # held nothing" — exit 4 is a claim about the CATALOGUE and such a run
+    # has no standing to make it.
     never_obtained = bool(failed_pages) and pages_completed == 0
 
     # Outcome precedence — decided ONCE, independent of --allow-empty.
     # `--allow-empty` controls only whether a zero-product result gets
-    # WRITTEN as a file (below); it must never launder a blocked or
-    # remote-API-error run into a "complete" status just because the
-    # caller also passed --allow-empty, and it must never do so just
-    # because SOME pages did return products while the run was, in fact,
-    # blocked partway through. A run audit (2026-09-15) found exactly
-    # this: with products present, or with --allow-empty set, `blocked`/
-    # `remote_api_error` were silently ignored and the run reported
-    # "complete", exit 0 — a monitoring/cron consumer would trust a run
-    # that never should have been trusted.
+    # WRITTEN as a file (below); it must never launder a blocked or failed
+    # run into "complete", and rows from SOME pages must not either. A run
+    # audit (2026-09-15) found exactly that: with products present, or with
+    # --allow-empty set, `blocked`/`remote_api_error` were ignored and the
+    # run reported "complete", exit 0.
     if remote_api_error:
-        status, exit_code = "remote_api_error", EXIT_FETCH_FAILED
+        status, cause = "remote_api_error", "remote_api_error"
     elif blocked:
-        status, exit_code = "blocked", EXIT_BLOCKED
+        status, cause = "blocked", "blocked"
+    elif not_found and zero_products:
+        status, cause = "not_found", "not_found"
+    elif parser_failed and zero_products:
+        status, cause = "parser_found_nothing", "parser_found_nothing"
     elif never_obtained:
-        # Ahead of zero_products on purpose: exit 4 is a claim about the
-        # CATALOGUE and this run has no standing to make it.
-        status, exit_code = "fetch_failed", EXIT_FETCH_FAILED
+        status, cause = "fetch_failed", "fetch_failed"
     elif zero_products:
-        status, exit_code = "empty", EXIT_ZERO_PRODUCTS
-    elif partial:
-        status, exit_code = "partial", EXIT_PARTIAL
+        status, cause = "empty", "no_results"
+    elif failed_pages or parser_failed or not_found:
+        # Rows were obtained, but part of the run failed: never "complete".
+        status = "partial"
+        cause = ("parser_found_nothing" if parser_failed
+                 else "not_found" if not_found else "page_failed")
     else:
-        status, exit_code = "complete", EXIT_OK
+        status, cause = "complete", (stop_reason or "complete")
+    exit_code = EXIT_BY_STATUS[status]
 
     # The "never overwrite good output with empty" rule: a zero-product
-    # outcome (whatever its status above — blocked/remote_api_error/empty
-    # all zero out `products`) writes NEITHER file NOR sidecar unless the
-    # caller explicitly opted in with --allow-empty. NEVER write a sidecar
-    # in the not-written case — this branch's whole point is that a
-    # PREVIOUS good <out>.json is left in place untouched, and a stale
-    # failure sidecar sitting right beside it would contradict that good
-    # data rather than describe it (this function's own docstring above,
-    # README's exit-code table, and CLAUDE.md §9 all promise this). The
-    # engine's own logs carry the diagnostic detail — that's what a failed
-    # run's output is FOR, not this file.
+    # outcome (whatever its status above) writes NEITHER file NOR sidecar
+    # unless the caller explicitly opted in with --allow-empty. A failure
+    # sidecar beside a PREVIOUS good <out>.json would contradict that good
+    # data rather than describe it; the engine's own log carries the
+    # diagnostic detail of a failed run.
     if zero_products and not allow_empty:
         return exit_code
 
-    write_output(products, out_path, fmt)
+    escaped = write_output(products, out_path, fmt)
+    extra = {}
+    if escaped is not None:
+        extra["csv_cells_escaped"] = escaped
+    # The caller's own keys win over ours, never the other way round.
+    extra.update(extra_meta or {})
     write_meta(
-        out_path, status=status, stop_reason=status, engine=engine, url=url,
+        out_path, status=status, stop_reason=cause, engine=engine, url=url,
         pages_requested=pages_requested, pages_completed=pages_completed,
         failed_pages=failed_pages, product_count=len(products),
         price_confirmed_pct=price_confirmed_pct, started_at=started_at,
-        extra=extra_meta,
+        extra=extra,
     )
     return exit_code

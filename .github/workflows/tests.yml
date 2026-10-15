@@ -24,8 +24,8 @@ jobs:
         run: python3 smoke_test.py
       - name: No committed credentials
         # RUNS .github/ci_checks.py RATHER THAN AN INLINE GREP, and that is a
-        # fix rather than a tidy-up. CLAUDE.md §17 records what happens with
-        # two implementations of one check: in three sibling repos the shipped
+        # fix rather than a tidy-up. Two implementations of one check drift
+        # apart: in three sibling repos the shipped
         # script was invoked by nothing while the workflow carried a narrower
         # grep, and the two disagreed in the direction that matters -- the
         # inline one matched only `ws://`/`wss://`, so an `http://user:pass@`
@@ -59,9 +59,8 @@ jobs:
   docker:
     name: docker image builds, runs, and launches Chromium
     runs-on: ubuntu-latest
-    # CLAUDE.md §11: "Build the Docker image in CI. Nothing else does,
-    # which is how all three older repos in this family shipped a broken
-    # one" — and an early build of THIS repo's own Dockerfile had the same
+    # Build the Docker image in CI: nothing else does, which is how three
+    # older repos in this family shipped a broken one — and an early build of THIS repo's own Dockerfile had the same
     # class of bug (the COPY list was missing files smoke_test.py needs at
     # build time, so `RUN python3 smoke_test.py` would have crashed
     # mid-build). That fix was verified by hand once; nothing has

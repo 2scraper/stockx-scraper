@@ -102,8 +102,9 @@ def _():
 
 
 # --------------------------------------------------------------------------- #
-# Banned wording (CLAUDE.md §12) — the original 2scraper.md brief predates
-# this naming and uses some of these; the shipped repo must not.
+# Banned wording — older product names and a retired host. The original
+# project brief predates the current naming and uses some of these; the
+# shipped repo must not.
 # --------------------------------------------------------------------------- #
 BANNED_PHRASES = (
     "cloud browser",
@@ -117,13 +118,13 @@ SHIPPED_TEXT_GLOBS = ("*.py", "*.md", "*.html", "*.toml", "*.cfg", "*.yml", "*.y
 _SKIP_DIRS = {".git", "tests", "__pycache__", ".venv", "venv", "node_modules"}
 
 
-@check("no banned wording in any shipped file (CLAUDE.md §12)")
+@check("no banned wording in any shipped file")
 def _():
     offenders = []
     for pattern in SHIPPED_TEXT_GLOBS:
         for path in ROOT.glob(pattern):
-            if path.name == "smoke_test.py" or path.name == "CLAUDE.md" or path.name.startswith("2scraper"):
-                continue  # this file and the reference docs are allowed to NAME the banned phrases
+            if path.name == "smoke_test.py":
+                continue  # this file is allowed to NAME the banned phrases
             text = path.read_text(encoding="utf-8", errors="ignore").lower()
             for phrase in BANNED_PHRASES:
                 if phrase in text:
@@ -186,7 +187,7 @@ def _():
     # the fix, parse_listing_node read those fields straight off the
     # node, so every Variant row came back with title/brand/sku/
     # product_url/image_url all null even though its price parsed fine —
-    # exactly the "always-null column" shape CLAUDE.md warns about, and
+    # an "always-null column" that looks like a site gap but is a parser one, and
     # it was ~1 in 6 rows on a real page, not a rare edge case. Trimmed,
     # scrubbed shape of the two real node types (values changed, brand
     # names are real StockX catalog data, not anyone's secret).
@@ -365,7 +366,7 @@ def _():
     html = '<div class="cf-turnstile" data-sitekey="x"></div>' + "<a href='/some-product'>p</a>" * 5
     result = captcha_solver.solve_when_blocked(
         client=None, page_url="https://stockx.com/search", html=html,
-        count_product_links=lambda h: 5,
+        count_product_links=lambda h: 5, budget=captcha_solver.SolveBudget(), can_use_token=True,
     )
     assert result["action"] == "skipped_products_present"
 
@@ -409,9 +410,8 @@ def _():
         # Real bug, found 2026-09-14 by testing the sidecar too (the check
         # above only ever looked at the DATA file): finish_run's own
         # docstring says "NEVER writes a sidecar for a failed run", README
-        # promises the same in the exit-code table, and CLAUDE.md §9 states
-        # it as a family invariant — "a 'failed' sidecar beside good data
-        # would contradict it" — but the code wrote one anyway, so a
+        # promises the same in the exit-code table — a failed sidecar
+        # beside good data would contradict it — but the code wrote one anyway, so a
         # consumer reading <out>.json.meta.json to decide whether to trust
         # <out>.json would see THIS run's "empty_not_written" status sitting
         # right next to a PREVIOUS run's perfectly good data.
@@ -518,7 +518,7 @@ def _():
     assert len({v0, v1, v2}) == 3, "each worker should start on a different exit"
 
 
-@check("redact_credentials scrubs URL userinfo AND key/token params, globally, from a real driver error shape (CLAUDE.md §8, live 2026-09-14)")
+@check("redact_credentials scrubs URL userinfo AND key/token params, globally, from a real driver error shape (live 2026-09-14)")
 def _():
     # Reproduced live: a failed connect_over_cdp repeats the ws:// endpoint
     # — login:password included — FOUR times in Playwright's own "Call
@@ -547,8 +547,7 @@ def _():
     assert redacted.count("***:***@") == 4, "must redact EVERY occurrence, not just the first"
 
     # requests puts the full URL, query string included, in an HTTPError —
-    # the fingerprint/random endpoint takes its key that way (CLAUDE.md §8
-    # names it explicitly).
+    # the fingerprint/random endpoint takes its key that way.
     fp_error = "404 Client Error: Not Found for url: https://api.2captcha.com/fingerprint/random?key=abcdef0123456789&format=chromium"
     redacted_fp = proxy_pool.redact_credentials(fp_error)
     assert "abcdef0123456789" not in redacted_fp
@@ -599,7 +598,7 @@ def _():
     )
 
 
-@check("a failed fingerprint/random request never leaks the key into the raised error (CLAUDE.md §8)")
+@check("a failed fingerprint/random request never leaks the key into the raised error")
 def _():
     import requests as _requests
     from scraper_api_client import TwoCaptchaClient, TwoCaptchaError
@@ -626,7 +625,7 @@ def _():
 
 # --------------------------------------------------------------------------- #
 # scrape_listing concurrency: a worker that raises must not lose its
-# siblings' pages (CLAUDE.md §10's own testing checklist names this case)
+# siblings' pages
 # --------------------------------------------------------------------------- #
 @check("playwright: an unexpected parse exception on a WORKER page degrades to a failed page, not a crash that discards page 1 (live 2026-09-14 regression)")
 def _():
@@ -698,7 +697,7 @@ def _():
 
     pp.parse_listing_page = _patched
     try:
-        pages_products, failed_pages, blocked, remote_api_error, _, _ = asyncio.run(
+        pages_products, failed_pages, _flags = asyncio.run(
             playwright_scraper.scrape_listing(
                 args=_Args(), start_url="https://stockx.com/category/sneakers",
                 browser=_FakeBrowser(), proxy_pool=None, client=None,
@@ -712,7 +711,7 @@ def _():
     assert 2 in failed_pages or 3 in failed_pages, f"the crashing page must be recorded as failed, not silently dropped: {failed_pages!r}"
 
 
-@check("puppeteer: an unexpected parse exception on a WORKER page degrades to a failed page, not a crash (mirrors the playwright fix, CLAUDE.md §6)")
+@check("puppeteer: an unexpected parse exception on a WORKER page degrades to a failed page, not a crash (mirrors the playwright fix)")
 def _():
     import asyncio
 
@@ -767,7 +766,7 @@ def _():
     original_launch = puppeteer_scraper._launch
     puppeteer_scraper._launch = _fake_launch
     try:
-        pages_products, failed_pages, blocked, remote_api_error = asyncio.run(
+        pages_products, failed_pages, _flags = asyncio.run(
             puppeteer_scraper.scrape_listing(
                 args=_Args(), start_url="https://stockx.com/category/sneakers",
                 proxy_pool=None, client=None,
@@ -782,7 +781,7 @@ def _():
     assert 2 in failed_pages or 3 in failed_pages, f"the crashing page must be recorded as failed, not silently dropped: {failed_pages!r}"
 
 
-@check("selenium: an unexpected parse exception on a WORKER page degrades to a failed page, not a crash (mirrors the playwright fix, CLAUDE.md §6)")
+@check("selenium: an unexpected parse exception on a WORKER page degrades to a failed page, not a crash (mirrors the playwright fix)")
 def _():
     fixture_html = (FIXTURES / "category_p1.html").read_text(encoding="utf-8")
     real_parse = pp.parse_listing_page
@@ -832,7 +831,7 @@ def _():
     original_build_driver = selenium_scraper._build_driver
     selenium_scraper._build_driver = _fake_build_driver
     try:
-        pages_products, failed_pages, blocked, remote_api_error = selenium_scraper.scrape_listing(
+        pages_products, failed_pages, _flags = selenium_scraper.scrape_listing(
             args=_Args(), start_url="https://stockx.com/category/sneakers",
             proxy_pool=None, client=None,
         )
@@ -991,7 +990,7 @@ def _():
                 )
 
 
-@check("apply_env treats a pasted {...} example fragment as unset, not as a real credential (CLAUDE.md §17)")
+@check("apply_env treats a pasted {...} example fragment as unset, not as a real credential")
 def _():
     # The exact family bug: .env.example documents STOCKX_CDP_ENDPOINT the
     # way the vendor documents it, `ws://{login}-zone-...-pid-{profileId}:
@@ -1055,9 +1054,9 @@ def _():
 _ENGINE_NAMES = ("playwright_scraper", "puppeteer_scraper", "selenium_scraper")
 
 
-@check("the credential scan has ONE implementation, and the workflow calls it (CLAUDE.md §17)")
+@check("the credential scan has ONE implementation, and the workflow calls it")
 def _():
-    """Two implementations of one check is the shape §17 warns about: in
+    """Two implementations of one check drift apart: in
     three sibling repos the shipped script was invoked by nothing while
     tests.yml carried a narrower grep, and the two disagreed in the
     direction that matters -- the inline one matched only `ws://`/`wss://`,
@@ -1076,8 +1075,8 @@ def _():
     # The escape is narrow ON PURPOSE: it triggers only when the whole
     # `.github` directory is absent, never when a file inside it is missing.
     # A check that quietly passes because its input disappeared is the
-    # failure mode CLAUDE.md §21 describes -- a guard is only as good as the
-    # fixture it runs against.
+    # failure mode to avoid -- a guard is only as good as the fixture it runs
+    # against.
     github = ROOT / ".github"
     if not github.is_dir():
         return          # inside the image: nothing to assert about CI here
@@ -1127,9 +1126,9 @@ def _():
     assert not problems, "unreachable statement(s): " + ", ".join(problems)
 
 
-@check("every call into a shared module binds against the callee's real signature (CLAUDE.md §17)")
+@check("every call into a shared module binds against the callee's real signature")
 def _():
-    """§17's check #1, and the one that earns its keep.
+    """The static check that earns its keep.
 
     A sibling repo shipped `classify(html, url=...)` in two of three engines
     against a callee whose second parameter is `status`, and BOTH crashed on
@@ -1217,7 +1216,7 @@ def _():
     assert bound_count > 10, f"only {bound_count} shared call(s) bound"
 
 
-@check("the three engines expose exactly the same CLI flags (CLAUDE.md §17, §20)")
+@check("the three engines expose exactly the same CLI flags")
 def _():
     """A sibling repo's README promised "same CLI" while the primary engine
     had TWELVE flags its twins did not, nine of them predating the claim --
@@ -1274,6 +1273,540 @@ def _():
             f"{name}: {stale} is listed as an engine-specific exception but "
             f"is now shared — remove it, or the docs describe a limitation "
             f"that is gone")
+
+
+# --------------------------------------------------------------------------- #
+# Output safety: atomic writes, file modes, CSV formula cells
+# --------------------------------------------------------------------------- #
+def _sample_rows():
+    return [_mk_product("a", price=-5.0, title="=HYPERLINK(\"http://x\",\"y\")"),
+            _mk_product("b", price=120.0, title="Air Jordan 4", brand="@brand")]
+
+
+@check("an interrupted write leaves the previous good output intact, and no temp file behind")
+def _():
+    import tempfile
+    real_dump = json.dump
+
+    def _dies_halfway(obj, f, **kw):
+        f.write("[{")
+        raise OSError("simulated full disk halfway through the write")
+
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "out.json"
+        output_writer.write_json(_sample_rows(), str(out))
+        good = out.read_bytes()
+        output_writer.json.dump = _dies_halfway
+        try:
+            try:
+                output_writer.write_json(_sample_rows()[:1], str(out))
+                raise AssertionError("the simulated failure did not propagate")
+            except OSError:
+                pass
+        finally:
+            output_writer.json.dump = real_dump
+        assert out.read_bytes() == good, "a failed write truncated the previous good file"
+        assert sorted(p.name for p in Path(d).iterdir()) == ["out.json"], \
+            f"temp file left behind: {sorted(p.name for p in Path(d).iterdir())}"
+
+
+@check("outputs and sidecar get 0o666 & ~umask when new, and keep an existing file's mode")
+def _():
+    import stat
+    import tempfile
+    for umask, expected in ((0o022, 0o644), (0o002, 0o664), (0o077, 0o600)):
+        old = os.umask(umask)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                for fmt in ("json", "csv"):
+                    out = str(Path(d) / f"out.{fmt}")
+                    code = output_writer.finish_run(
+                        products=_sample_rows(), out_path=out, fmt=fmt, engine="test", url="https://x",
+                        pages_requested=1, pages_completed=1, failed_pages=[], blocked=False,
+                        remote_api_error=False, allow_empty=False, started_at=0)
+                    assert code == output_writer.EXIT_OK
+                    for path in (out, out + ".meta.json"):
+                        mode = stat.S_IMODE(os.stat(path).st_mode)
+                        assert mode == expected, f"umask {umask:o}: {Path(path).name} is {mode:o}, expected {expected:o}"
+        finally:
+            os.umask(old)
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "out.json"
+        out.write_text("[]", encoding="utf-8")
+        os.chmod(out, 0o640)
+        output_writer.write_json(_sample_rows(), str(out))
+        assert stat.S_IMODE(os.stat(out).st_mode) == 0o640, "an existing file's own mode was not kept"
+
+
+@check("CSV neutralises formula-shaped strings (not numbers, not JSON) and counts them in the sidecar")
+def _():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        out_csv = str(Path(d) / "out.csv")
+        output_writer.finish_run(
+            products=_sample_rows(), out_path=out_csv, fmt="csv", engine="test", url="https://x",
+            pages_requested=1, pages_completed=1, failed_pages=[], blocked=False,
+            remote_api_error=False, allow_empty=False, started_at=0,
+            extra_meta={"note": "caller"})
+        with open(out_csv, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        assert rows[0]["title"] == "'=HYPERLINK(\"http://x\",\"y\")", rows[0]["title"]
+        assert rows[1]["brand"] == "'@brand", rows[1]["brand"]
+        assert rows[0]["price"] == "-5.0", f"a negative number must stay a number: {rows[0]['price']!r}"
+        meta = json.loads(Path(out_csv + ".meta.json").read_text(encoding="utf-8"))
+        assert meta["csv_cells_escaped"] == 2, meta
+        assert meta["note"] == "caller", "the caller's extra_meta was lost"
+
+        out_json = str(Path(d) / "out.json")
+        output_writer.finish_run(
+            products=_sample_rows(), out_path=out_json, fmt="json", engine="test", url="https://x",
+            pages_requested=1, pages_completed=1, failed_pages=[], blocked=False,
+            remote_api_error=False, allow_empty=False, started_at=0)
+        data = json.loads(Path(out_json).read_text(encoding="utf-8"))
+        assert data[0]["title"].startswith("=HYPERLINK"), "JSON must keep the text exactly as served"
+        meta = json.loads(Path(out_json + ".meta.json").read_text(encoding="utf-8"))
+        assert "csv_cells_escaped" not in meta
+
+        # The caller's own value wins over ours, never the other way round.
+        output_writer.finish_run(
+            products=_sample_rows(), out_path=out_csv, fmt="csv", engine="test", url="https://x",
+            pages_requested=1, pages_completed=1, failed_pages=[], blocked=False,
+            remote_api_error=False, allow_empty=False, started_at=0,
+            extra_meta={"csv_cells_escaped": "caller-value"})
+        meta = json.loads(Path(out_csv + ".meta.json").read_text(encoding="utf-8"))
+        assert meta["csv_cells_escaped"] == "caller-value", meta
+
+
+# --------------------------------------------------------------------------- #
+# Paid solves: never bought without a use for the token, never past budget
+# --------------------------------------------------------------------------- #
+class _CountingClient:
+    """Stands in for TwoCaptchaClient; counts purchases. Never on the network."""
+    def __init__(self, raise_exc=None):
+        self.purchases = 0
+        self.raise_exc = raise_exc
+
+    def solve_and_wait(self, task):
+        self.purchases += 1
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return "token-from-stub"
+
+
+_CAPTCHA_PAGE = ('<html><head><title>Verify</title></head><body>'
+                 '<div class="g-recaptcha" data-sitekey="6Lc_stub_sitekey"></div></body></html>')
+
+
+@check("solve budget: claimed BEFORE the purchase, one per page, and no purchase without a use for the token")
+def _():
+    client = _CountingClient()
+    budget = captcha_solver.SolveBudget()
+    kw = dict(client=client, page_url="https://stockx.com/x", html=_CAPTCHA_PAGE, count_product_links=lambda h: 0)
+    first = captcha_solver.solve_when_blocked(budget=budget, can_use_token=True, **kw)
+    second = captcha_solver.solve_when_blocked(budget=budget, can_use_token=True, **kw)
+    assert first["action"] == "solved" and second["action"] == "budget_exhausted", (first, second)
+    assert client.purchases == 1, client.purchases
+    unused = captcha_solver.solve_when_blocked(budget=captcha_solver.SolveBudget(), can_use_token=False, **kw)
+    assert unused["action"] == "detected_not_solved", unused
+    assert client.purchases == 1, "a solve was bought for a token nothing would inject"
+    # Every call site must decide both: neither has a default.
+    params = inspect.signature(captcha_solver.solve_when_blocked).parameters
+    assert params["budget"].default is inspect.Parameter.empty
+    assert params["can_use_token"].default is inspect.Parameter.empty
+
+
+@check("a solver transport error is a warning, not a crash, and leaks no key")
+def _():
+    import requests
+    from scraper_api_client import TwoCaptchaClient
+    real_post = requests.post
+    secret = "k" * 12
+
+    def _refused(url, json=None, timeout=None):
+        raise requests.exceptions.ConnectionError(f"refused connecting to {url}?key={secret}")
+
+    requests.post = _refused
+    try:
+        result = captcha_solver.solve_when_blocked(
+            client=TwoCaptchaClient(secret), page_url="https://stockx.com/x", html=_CAPTCHA_PAGE,
+            count_product_links=lambda h: 0, budget=captcha_solver.SolveBudget(), can_use_token=True)
+    finally:
+        requests.post = real_post
+    assert result["action"] == "warning_solver_error", result
+    assert secret not in result["detail"], result["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# Whole runs through each engine against fake drivers: exit code + sidecar
+# --------------------------------------------------------------------------- #
+_LISTING_HTML = (FIXTURES / "category_p1.html").read_text(encoding="utf-8")
+_PRODUCT_HTML = (FIXTURES / "product_flight_club.html").read_text(encoding="utf-8")
+_EMPTY_QUERY = {"queryKey": ["getDiscoveryData", {"variables": {"currency": "USD"}}],
+                "state": {"data": {"browse": {"results": {
+                    "edges": [], "pageInfo": {"page": 1, "pageCount": 0, "total": 0}}}}}}
+_EMPTY_LISTING_HTML = (
+    '<html><body><script id="__NEXT_DATA__" type="application/json">'
+    + json.dumps({"props": {"pageProps": {"req": {"appContext": {"states": {"query": {"value": {
+        "queries": [_EMPTY_QUERY]}}}}}}}})
+    + "</script></body></html>")
+_BLOCK_403_HTML = '<!DOCTYPE html><html id="__next_error__"><body>Something went wrong</body></html>'
+_NOT_FOUND_HTML = "<html><body><h1>Page not found</h1><a href='/sneakers'>Sneakers</a></body></html>"
+
+
+def _page_number(url):
+    from urllib.parse import parse_qs, urlparse
+    return int(parse_qs(urlparse(url).query).get("page", ["1"])[0])
+
+
+def _engine_run(engine, argv, route, *, captcha_client=None):
+    """Run `engine.run()` end to end with its driver faked. `route(url)`
+    returns (status, html). Returns (exit_code, meta or None, nav_count)."""
+    import asyncio
+    import tempfile
+    import types
+
+    navs = []
+
+    def serve(url):
+        navs.append(url)
+        return route(url)
+
+    class _PwPage:
+        async def goto(self, url, wait_until=None, timeout=None):
+            self._status, self._html = serve(url)
+            return types.SimpleNamespace(status=self._status)
+
+        async def wait_for_timeout(self, ms):
+            pass
+
+        async def content(self):
+            return self._html
+
+    class _PwCtx:
+        async def new_page(self):
+            return _PwPage()
+
+        async def close(self):
+            pass
+
+    class _PwBrowser:
+        async def new_context(self, **kw):
+            return _PwCtx()
+
+        async def close(self):
+            pass
+
+    class _PwChromium:
+        async def launch(self, headless=True):
+            return _PwBrowser()
+
+    class _PwCM:
+        async def __aenter__(self):
+            return types.SimpleNamespace(chromium=_PwChromium())
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _PpPage:
+        async def goto(self, url, opts=None):
+            self._status, self._html = serve(url)
+            return types.SimpleNamespace(status=self._status)
+
+        async def content(self):
+            return self._html
+
+    class _PpBrowser:
+        async def newPage(self):
+            return _PpPage()
+
+        async def close(self):
+            pass
+
+    async def _pp_launch(*, headless, proxy, cdp_endpoint):
+        return _PpBrowser()
+
+    class _SeDriver:
+        def set_page_load_timeout(self, s):
+            pass
+
+        def get(self, url):
+            self._status, self._html = serve(url)
+
+        @property
+        def page_source(self):
+            return self._html
+
+        def execute_script(self, script):
+            return self._status
+
+        def quit(self):
+            pass
+
+    def _se_build(*, headless, proxy, cdp_endpoint):
+        return _SeDriver()
+
+    patches = []
+
+    def patch(obj, name, value):
+        patches.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    if engine is playwright_scraper:
+        patch(engine, "async_playwright", lambda: _PwCM())
+        patch(engine, "READINESS_WAIT_MS", 0)
+    elif engine is puppeteer_scraper:
+        patch(engine, "pyppeteer_launch", _pp_launch)
+        patch(engine, "_launch", _pp_launch)
+        patch(engine, "READINESS_WAIT_S", 0)
+    else:
+        patch(engine, "webdriver", object())
+        patch(engine, "_build_driver", _se_build)
+        patch(engine, "READINESS_WAIT_S", 0)
+    if captcha_client is not None:
+        patch(engine, "TwoCaptchaClient", lambda key: captcha_client)
+        argv = argv + ["--twocaptcha-key", "stub-not-a-key"]
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            out = str(Path(d) / "out.json")
+            args = engine.build_arg_parser().parse_args(
+                argv + ["--out", out, "--delay", "0", "--retry-delay", "0"])
+            result = engine.run(args)
+            if asyncio.iscoroutine(result):
+                result = asyncio.run(result)
+            meta_path = Path(out + ".meta.json")
+            meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else None
+            return result, meta, len(navs)
+    finally:
+        for obj, name, value in reversed(patches):
+            setattr(obj, name, value)
+
+
+_ENGINES = (playwright_scraper, selenium_scraper, puppeteer_scraper)
+_CATEGORY = ["--url", "https://stockx.com/category/sneakers"]
+_PRODUCT = ["--url", "https://stockx.com/air-jordan-4-retro-og-flight-club"]
+
+
+@check("every engine: a 3-page listing completes with exit 0 and records why it stopped")
+def _():
+    for engine in _ENGINES:
+        def route(url):
+            # Distinct skus per page, so no page reads as a repeat.
+            n = _page_number(url)
+            return 200, _LISTING_HTML.replace('"urlKey": "', f'"urlKey": "p{n}-')
+        code, meta, navs = _engine_run(engine, _CATEGORY + ["--pages", "3"], route)
+        assert code == 0, f"{engine.__name__}: exit {code}"
+        assert meta["status"] == "complete" and meta["pages_completed"] == 3, (engine.__name__, meta)
+        assert meta["stop_reason"] == "requested_pages_done", (engine.__name__, meta["stop_reason"])
+        assert navs == 3, (engine.__name__, navs)
+
+
+@check("every engine: a served page whose rows cannot be read is a parser failure (exit 5), not an empty catalogue")
+def _():
+    renamed_rows = _LISTING_HTML.replace('"edges"', '"nodes"')
+    renamed_query = _LISTING_HTML.replace("getDiscoveryData", "getDiscoveryDataV2")
+    for engine in _ENGINES:
+        for label, html in (("rows key renamed", renamed_rows), ("query renamed", renamed_query)):
+            code, meta, _ = _engine_run(engine, _CATEGORY + ["--allow-empty"], lambda url: (200, html))
+            assert code == output_writer.EXIT_FETCH_FAILED, f"{engine.__name__} ({label}): exit {code}"
+            assert meta["status"] == "parser_found_nothing" and meta["failed_pages"] == [1], (engine.__name__, label, meta)
+        # A page whose own query reports zero results IS a genuine empty.
+        code, _, _ = _engine_run(engine, _CATEGORY, lambda url: (200, _EMPTY_LISTING_HTML))
+        assert code == output_writer.EXIT_ZERO_PRODUCTS, f"{engine.__name__}: genuine empty gave exit {code}"
+        # A product page with neither JSON-LD nor GetProduct.
+        code, meta, _ = _engine_run(engine, _PRODUCT + ["--allow-empty"],
+                                    lambda url: (200, "<html><body>" + "<a href='/x'>x</a>" * 3 + "</body></html>"))
+        assert code == output_writer.EXIT_FETCH_FAILED and meta["status"] == "parser_found_nothing", (engine.__name__, code, meta)
+
+
+@check("every engine: a 404 is not_found (exit 5), not blocked, on a product and on a listing")
+def _():
+    for engine in _ENGINES:
+        for argv in (_PRODUCT, _CATEGORY):
+            code, meta, _ = _engine_run(engine, argv + ["--allow-empty"], lambda url: (404, _NOT_FOUND_HTML))
+            assert code == output_writer.EXIT_FETCH_FAILED, f"{engine.__name__} {argv[1]}: exit {code}"
+            assert meta["status"] == "not_found", (engine.__name__, meta)
+        # The block page still reads as blocked.
+        code, _, _ = _engine_run(engine, _PRODUCT, lambda url: (403, _BLOCK_403_HTML))
+        assert code == output_writer.EXIT_BLOCKED, f"{engine.__name__}: 403 gave exit {code}"
+
+
+@check("every engine: a page blocked mid-run is a FAILED page, not a completed one")
+def _():
+    for engine in _ENGINES:
+        def route(url):
+            return (200, _LISTING_HTML) if _page_number(url) == 1 else (403, _BLOCK_403_HTML)
+        code, meta, _ = _engine_run(engine, _CATEGORY + ["--pages", "2"], route)
+        assert code == output_writer.EXIT_BLOCKED, f"{engine.__name__}: exit {code}"
+        assert meta["pages_completed"] == 1 and meta["failed_pages"] == [2], (engine.__name__, meta)
+        assert meta["stop_reason"] == "blocked", (engine.__name__, meta)
+
+
+@check("every engine: a captcha page buys NO solve (no engine injects a token) and reads as blocked")
+def _():
+    for engine in _ENGINES:
+        for argv in (_PRODUCT, _CATEGORY + ["--pages", "2"]):
+            client = _CountingClient()
+            code, _, _ = _engine_run(engine, argv, lambda url: (200, _CAPTCHA_PAGE), captcha_client=client)
+            assert code == output_writer.EXIT_BLOCKED, f"{engine.__name__} {argv[1]}: exit {code}"
+            assert client.purchases == 0, f"{engine.__name__}: {client.purchases} solve(s) bought for a token nothing injects"
+
+
+@check("every engine: --retries 0 is one navigation; negative counts and zero pages are refused with exit 2")
+def _():
+    for engine in _ENGINES:
+        code, _, navs = _engine_run(engine, _PRODUCT + ["--retries", "0"], lambda url: (200, _PRODUCT_HTML))
+        assert code == 0 and navs == 1, (engine.__name__, code, navs)
+        parser = engine.build_arg_parser()
+        for argv in (["--retries", "-1"], ["--pages", "0"], ["--concurrency", "-3"], ["--concurrency", "0"],
+                     ["--delay", "-1"], ["--retry-delay", "-1"], ["--proxy-block-retries", "-1"]):
+            import contextlib
+            import io
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                try:
+                    parser.parse_args(argv)
+                    raise AssertionError(f"{engine.__name__} accepted {argv}")
+                except SystemExit as exc:
+                    assert exc.code == 2, (engine.__name__, argv, exc.code)
+            assert argv[0] in err.getvalue(), f"{engine.__name__}: the error does not name {argv[0]}"
+
+
+@check("selenium: --proxy-rotate gives each sequential page a fresh browser on the next exit")
+def _():
+    built = []
+
+    class _Driver:
+        def set_page_load_timeout(self, s):
+            pass
+
+        def get(self, url):
+            self._n = _page_number(url)
+
+        @property
+        def page_source(self):
+            return _LISTING_HTML.replace('"urlKey": "', f'"urlKey": "p{self._n}-')
+
+        def execute_script(self, script):
+            return 200
+
+        def quit(self):
+            pass
+
+    def _build(*, headless, proxy, cdp_endpoint):
+        built.append(proxy.server_only() if proxy else None)
+        return _Driver()
+
+    pool = proxy_pool.ProxyPool([proxy_pool.parse_proxy_line("http://h1:1111"),
+                                 proxy_pool.parse_proxy_line("http://h2:2222")])
+    args = selenium_scraper.build_arg_parser().parse_args(
+        ["--pages", "2", "--proxy-rotate", "--delay", "0", "--retries", "0"])
+    real = selenium_scraper._build_driver
+    selenium_scraper._build_driver = _build
+    try:
+        selenium_scraper.scrape_listing(args=args, start_url="https://stockx.com/category/sneakers",
+                                        proxy_pool=pool, client=None)
+    finally:
+        selenium_scraper._build_driver = real
+    assert len(built) == 2 and built[0] != built[1], f"no rotation: {built}"
+
+
+@check("a typed --category beats STOCKX_URL from the environment; --url with --category is refused")
+def _():
+    import argparse
+    import contextlib
+    import io
+    prev = os.environ.get("STOCKX_URL")
+    os.environ["STOCKX_URL"] = "https://stockx.com/search?s=foo"
+    try:
+        args = argparse.Namespace(url=None, category="sneakers")
+        env_config.apply_env(args, dotenv_path=str(ROOT / "_no_such_file.env"))
+        assert args.url is None, f"the environment URL overrode --category: {args.url!r}"
+        for engine in _ENGINES:
+            assert engine._resolve_start_url(args) == pp.category_page_url("sneakers")
+        args = argparse.Namespace(url=None, category=None)
+        env_config.apply_env(args, dotenv_path=str(ROOT / "_no_such_file.env"))
+        assert args.url == "https://stockx.com/search?s=foo", "STOCKX_URL alone must still apply"
+    finally:
+        if prev is None:
+            os.environ.pop("STOCKX_URL", None)
+        else:
+            os.environ["STOCKX_URL"] = prev
+    for engine in _ENGINES:
+        argv = sys.argv
+        sys.argv = [engine.__name__, "--url", "https://stockx.com/search?s=x", "--category", "sneakers"]
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                engine.main()
+            raise AssertionError(f"{engine.__name__} accepted --url with --category")
+        except SystemExit as exc:
+            assert exc.code == 2, (engine.__name__, exc.code)
+        finally:
+            sys.argv = argv
+
+
+@check("env_config's report never prints any part of a secret")
+def _():
+    value = "abcd" + "0123456789" + "wxyz"
+    masked = env_config._mask(value)
+    for part in (value[:4], value[-2:], value[-4:]):
+        assert part not in masked, masked
+
+
+# --------------------------------------------------------------------------- #
+# The credential scan itself
+# --------------------------------------------------------------------------- #
+@check("the credential scan finds a planted key from a clone under a directory named venv, and fails on 0 files")
+def _():
+    import shutil
+    import subprocess
+    import tempfile
+    script = ROOT / ".github" / "ci_checks.py"
+    if not script.is_file():
+        return  # inside the Docker image: .github is not shipped there
+    with tempfile.TemporaryDirectory() as d:
+        clone = Path(d) / "venv" / "stockx-scraper"
+        (clone / ".github").mkdir(parents=True)
+        shutil.copy(script, clone / ".github" / "ci_checks.py")
+        empty = subprocess.run([sys.executable, str(clone / ".github" / "ci_checks.py"), "--secret-check"],
+                               capture_output=True, text=True)
+        # Only the scanner itself is there, and it is a .py file: one file.
+        assert empty.returncode == 0 and "1 files scanned" in empty.stdout, empty.stdout + empty.stderr
+        (clone / "scratch.py").write_text("KEY = '" + "0a1b2c3d" * 4 + "'\n", encoding="utf-8")
+        planted = subprocess.run([sys.executable, str(clone / ".github" / "ci_checks.py"), "--secret-check"],
+                                 capture_output=True, text=True)
+        assert planted.returncode == 1 and "scratch.py" in planted.stdout, planted.stdout
+    source = script.read_text(encoding="utf-8")
+    assert "scanned == 0" in source, "the scan no longer fails when it read nothing"
+
+
+# --------------------------------------------------------------------------- #
+# Public files carry no references to private working notes
+# --------------------------------------------------------------------------- #
+# Assembled from pieces so this file does not match its own guard.
+_PRIVATE_TOKENS = ("CLAUDE" + ".md", "claude_" + "2scraper", "2scraper_" + "repo_rules",
+                   "play" + "book §", "template " + "§")
+_SECTION_REF = re.compile("§" + r"\s*\d")
+
+
+@check("no shipped file cites private working notes or their section numbers")
+def _():
+    import subprocess
+    if not (ROOT / ".github").is_dir():
+        return  # inside the Docker image: only a subset of files is copied there
+    try:
+        listed = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.split()
+        paths = [ROOT / p for p in listed]
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        paths = [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.parts]
+    offenders = []
+    for path in paths:
+        if not path.is_file() or path.suffix in (".png", ".jpg", ".ico", ".gz", ".zip"):
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if any(t in line for t in _PRIVATE_TOKENS) or _SECTION_REF.search(line):
+                offenders.append(f"{path.relative_to(ROOT)}:{lineno}")
+    assert len(paths) > 20, f"only {len(paths)} files listed — the guard would prove nothing"
+    assert not offenders, "private citations in shipped files: " + ", ".join(offenders[:20])
 
 
 def run() -> int:

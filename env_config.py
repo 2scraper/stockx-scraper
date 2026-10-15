@@ -46,7 +46,7 @@ ENV_KEYS: Dict[str, str] = {
 }
 
 _PLACEHOLDER_RE = re.compile(r"^\s*$")
-# CLAUDE.md §17: a copied .env.example can document a credentialled URL the
+# A copied .env.example can document a credentialled URL the
 # way the vendor documents it — `ws://{login}-zone-...-pid-{profileId}:
 # {password}@cb.2captcha.com:9222` — and a literal-placeholder check (an
 # exact string like "your_key_here") never matches that shape, so pasting
@@ -62,9 +62,9 @@ _BRACED_PLACEHOLDER_RE = re.compile(r"[{}]")
 
 
 def _is_placeholder(value: Optional[str]) -> bool:
-    """One implementation, used by both apply_env() and _report() — CLAUDE.md
-    §17 names the alternative (two independent checks that quietly drift
-    apart) as its own defect class. True for an empty value, or one that
+    """One implementation, used by both apply_env() and _report() — two
+    independent checks of one rule quietly drift apart, which is a defect
+    class of its own. True for an empty value, or one that
     still contains a `{...}` example fragment."""
     if value is None:
         return True
@@ -102,10 +102,20 @@ def apply_env(args: argparse.Namespace, dotenv_path: str = ".env") -> argparse.N
     A destination counts as "unset" only when it is still at its argparse
     default (None for the flags this is used with) — a flag the caller typed
     is never touched, per the precedence rule above.
+
+    STOCKX_URL is skipped when the caller typed `--category`: the category
+    builds its own start URL, and an environment URL filling `--url` would
+    otherwise win over it silently (the engines resolve `--url` first). A
+    typed flag outranks the environment, including this indirect way.
     """
     dotenv_values = load_dotenv_values(dotenv_path)
     for env_key, dest in ENV_KEYS.items():
         if not hasattr(args, dest) or getattr(args, dest) not in (None, ""):
+            continue
+        if dest == "url" and getattr(args, "category", None):
+            if os.environ.get(env_key) or dotenv_values.get(env_key):
+                log.info("%s is set but --category was typed — using the category, not %s.",
+                         env_key, env_key)
             continue
         # exported environment variable outranks .env
         value = os.environ.get(env_key)
@@ -134,11 +144,11 @@ def apply_env(args: argparse.Namespace, dotenv_path: str = ".env") -> argparse.N
 
 
 def _mask(value: Optional[str]) -> str:
+    # The length only: even four leading characters of a key or a proxy
+    # login are part of the secret, and this report promises none are shown.
     if not value:
         return "(not set)"
-    if len(value) <= 8:
-        return "*" * len(value)
-    return f"{value[:4]}…{value[-2:]} ({len(value)} chars)"
+    return f"(set, {len(value)} chars)"
 
 
 def _report() -> None:

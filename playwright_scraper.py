@@ -9,13 +9,13 @@ Example:
     python3 playwright_scraper.py --url "https://stockx.com/search?s=jordan+4" --pages 2
     python3 playwright_scraper.py --url "https://stockx.com/air-jordan-4-retro-og-flight-club"   # single product
 
-Measured live, 2026-09-10 (see README "What was actually measured"): an
-ordinary local headless Chromium, no proxy, no CAPTCHA key, cleared
-stockx.com's Cloudflare bot-management fingerprinting scripts and returned
-full listing/product data on every page requested. The paid products (a
-`--twocaptcha-key`, `--proxy`, a `--cdp-endpoint` Scraping Browser session)
-are for volume, a specific exit country, or a consistent device identity —
-not because the free path is blocked. Say so before recommending them.
+Access varies by date, exit and client (see README "What was actually
+measured" and "Known limitations"): on 2026-09-10 an ordinary local
+headless Chromium with no proxy and no key returned full data; in runs on
+2026-09-13/14, direct and residential-proxy sessions got a fast HTTP 403,
+and only a --cdp-endpoint (2Captcha Scraping Browser API) session got
+through. Try the free path first and read the exit code: 3 means the
+site refused this client.
 """
 from __future__ import annotations
 
@@ -38,16 +38,16 @@ else:
 
 import env_config
 import product_parser as pp
-from captcha_solver import detect_from_html, solve_when_blocked
+from captcha_solver import SolveBudget, solve_when_blocked
 from fingerprint_client import refuse_if_cdp
-from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, Product, finish_run, merge_pages, sku_key as _sku_key
+from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, Product, RunFlags, finish_run, merge_pages, sku_key as _sku_key
 from proxy_pool import Proxy, ProxyPool, is_proxy_dead_error, load_proxies, redact_credentials
 from scraper_api_client import TwoCaptchaClient
 
 ENGINE_NAME = "playwright"
 BASE_URL = pp.BASE_URL
 
-# --- the handful of engine constants that vary per site (CLAUDE.md §5) ---
+# --- the handful of engine constants that vary per site ---
 NAV_TIMEOUT_MS = 30_000
 READINESS_WAIT_MS = 2_500
 MIN_CARD_MATCHES = pp.MIN_CARD_MATCHES
@@ -99,7 +99,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--proxy-file", default=None, help="One proxy per line, same formats as --proxy")
     p.add_argument("--proxy-rotate", action="store_true", help="Use a fresh proxy (and a fresh browser context) for every page")
     p.add_argument("--proxy-shuffle", action="store_true")
-    p.add_argument("--proxy-block-retries", type=int, default=3)
+    p.add_argument("--proxy-block-retries", type=_nonnegative_int, default=3)
     p.add_argument("--twocaptcha-key", default=None, help="(or set TWOCAPTCHA_KEY)")
     p.add_argument("--captcha-api", default=None, help="Override the 2Captcha API base URL (testing only)")
     p.add_argument("--solve-captcha", choices=["off", "when-blocked", "always"], default="when-blocked")
@@ -198,28 +198,38 @@ async def _enable_scraping_browser_auto_solve(context: BrowserContext, page: Pag
         log.warning("Captcha.setAutoSolve unavailable on this CDP session (continuing without it): %s", exc)
 
 
+# Solver outcomes that mean "a captcha gates this page and nothing cleared
+# it". Combined with zero product links, the page is blocked.
+_UNCLEARED_CAPTCHA = ("warning_no_key", "warning_solver_error", "detected_unidentified_widget",
+                      "detected_not_solved", "budget_exhausted")
+
+
 async def _maybe_solve_captcha(
-    *, html: str, url: str, client: Optional[TwoCaptchaClient], policy: str,
+    *, html: str, url: str, client: Optional[TwoCaptchaClient], policy: str, budget: SolveBudget,
 ) -> Optional[dict]:
-    if policy == "off" or client is None:
+    """Detection always runs (it is free); a paid solve never does here:
+    this engine does not inject a token into the page, so
+    `can_use_token=False` and no solve is bought."""
+    if policy == "off":
         return None
     result = solve_when_blocked(
         client=client, page_url=url, html=html, count_product_links=pp.count_product_links,
+        budget=budget, can_use_token=False,
     )
     action = result.get("action")
-    if action == "no_captcha_detected":
-        pass
-    elif action == "skipped_products_present":
+    if action == "skipped_products_present":
         log.info("Captcha widget present but products already rendered — not solving.")
-    elif action == "warning_no_key":
-        log.warning("Captcha solving skipped: %s", result.get("detail"))
-    elif action == "warning_solver_error":
-        log.warning("Captcha solve failed: %s", result.get("detail"))
-    elif action == "solved":
-        log.info("Captcha solved via 2Captcha (%s).", result.get("captcha_type"))
+    elif action == "detected_not_solved":
+        log.warning("A %s captcha gates this page. No solve was bought: this engine does not "
+                    "inject a solver token into a local browser. --cdp-endpoint (the 2Captcha "
+                    "Scraping Browser API) solves inside its own session.", result.get("captcha_type"))
     elif action == "detected_unidentified_widget":
         log.warning("A captcha-like marker was detected but no known widget/sitekey could be extracted.")
     return result
+
+
+def _captcha_blocks(result: Optional[dict], html: str) -> bool:
+    return bool(result) and result.get("action") in _UNCLEARED_CAPTCHA and pp.count_product_links(html) == 0
 
 
 async def _connect_over_cdp(pw, cdp_endpoint: str):
@@ -229,7 +239,7 @@ async def _connect_over_cdp(pw, cdp_endpoint: str):
     (the message plus a four-line "Call log"), confirmed live 2026-09-14
     against a bad endpoint. `run()`'s outer `except Exception:
     log.exception(...)` would otherwise print that straight to the log —
-    exactly the family bug CLAUDE.md §8 names by name. `from None` drops the
+    a credential leak through an error message. `from None` drops the
     original exception from the chain so its own unredacted text can never
     surface via "the above exception was the direct cause of…"."""
     try:
@@ -241,14 +251,15 @@ async def _connect_over_cdp(pw, cdp_endpoint: str):
 async def scrape_listing(
     *, args: argparse.Namespace, start_url: str, browser: Browser,
     proxy_pool: Optional[ProxyPool], client: Optional[TwoCaptchaClient], autosolve: bool = False,
-) -> Tuple[List[List[Product]], List[int], bool, bool, Optional[int], Optional[str]]:
-    """Returns (pages_products_in_order, failed_page_numbers, blocked,
-    remote_api_error, page_count_reported_by_site, dump_out_prefix)."""
+) -> Tuple[List[List[Product]], List[int], RunFlags]:
+    """Returns (pages_products_in_order, failed_page_numbers, flags).
+
+    A page counts as completed only when it was served AND parsed: a
+    blocked, not-found or unreadable page goes into `failed_pages`, never
+    into the completed count."""
     pages_products: List[List[Product]] = []
     failed_pages: List[int] = []
-    blocked = False
-    remote_api_error = False
-    reported_page_count: Optional[int] = None
+    flags = RunFlags()
 
     proxy = proxy_pool.next() if proxy_pool else None
     log.info("Using proxy %s", proxy.masked() if proxy else "(no local proxy pool — direct connection, or a --cdp-endpoint session providing its own exit)")
@@ -257,84 +268,85 @@ async def scrape_listing(
     if autosolve:
         await _enable_scraping_browser_auto_solve(context, page)
 
-    async def fetch_page(n: int, ctx_page: Page, cur_proxy: Optional[Proxy]) -> Tuple[Optional[str], Optional[Proxy]]:
+    async def fetch_page(n: int, ctx_page: Page, cur_proxy: Optional[Proxy]):
+        """Returns (listing or None, proxy). Records a failed page and its
+        cause in `failed_pages` / `flags` itself."""
         url = pp.page_url(start_url, n)
+        budget = SolveBudget()  # one per page, created before any retry
         html, used_proxy, status, error = await _fetch(
             ctx_page, url, retries=args.retries, retry_delay=args.retry_delay,
             proxy_pool=proxy_pool, current_proxy=cur_proxy,
         )
-        nonlocal blocked
         if html is None:
             log.error("Page %d permanently failed: %s", n, error)
             failed_pages.append(n)
             return None, used_proxy
-        if status is not None and status >= 400:
-            # A hard fact from the server, independent of body wording —
-            # see _fetch()'s docstring. Report it and stop treating this
-            # page as real content, but still let it flow through to
-            # dump-html / diagnostics below.
-            log.warning("Page %d returned HTTP %d — treating as blocked, not empty.", n, status)
-            blocked = True
-            if proxy_pool is not None and used_proxy is not None and status in (403, 429):
-                proxy_pool.report_failure(used_proxy, dead=True)
-        elif status is not None and proxy_pool is not None and used_proxy is not None:
-            proxy_pool.report_success(used_proxy)
         if args.dump_html:
             Path(_dump_path(args.out, n)).write_text(html, encoding="utf-8")
-        if detect_from_html(html, pp.APP_ERROR_MARKERS) or detect_from_html(html, pp.BOT_SITE_GUARD_MARKERS):
-            blocked = True
-        captcha_result = await _maybe_solve_captcha(html=html, url=url, client=client, policy=args.solve_captcha)
-        if captcha_result and captcha_result.get("action") in ("warning_no_key", "warning_solver_error", "detected_unidentified_widget"):
-            if pp.count_product_links(html) == 0:
-                blocked = True
-        return html, used_proxy
-
-    def safe_parse(n: int, html_text: str):
-        """`_fetch()` already contains every NETWORK-level failure (it
-        catches internally and returns `(None, ..., error)` — see its own
-        docstring). An unexpected exception INSIDE parsing (a page that
-        fetched fine but has a shape product_parser doesn't expect) had no
-        equivalent containment: it would propagate out of `scrape_listing`
-        through `run()`'s outer `except Exception` and crash the whole run,
-        discarding every already-collected page's data — including page 1's,
-        fetched synchronously before any concurrent worker even starts.
-        Live-reproduced 2026-09-14 via a monkeypatched `parse_listing_page`
-        raising on a worker page. CLAUDE.md §10's testing checklist names
-        this exact case: "a worker that raises neither hangs the run nor
-        loses its siblings' pages." One bad page degrades the run to
-        EXIT_PARTIAL, same as a page that failed to fetch — it must never
-        turn a partially-successful run into EXIT_CRASH."""
-        try:
-            return pp.parse_listing_page(html_text, requested_url=start_url)
-        except Exception as exc:  # noqa: BLE001 — see docstring above
-            log.error("Page %d fetched OK but failed to parse — treating as failed, not crashing: %s", n, exc)
+        state = pp.classify_served_page(html, status)
+        if state == "ok":
+            if status is not None and proxy_pool is not None and used_proxy is not None:
+                proxy_pool.report_success(used_proxy)
+            captcha_result = await _maybe_solve_captcha(
+                html=html, url=url, client=client, policy=args.solve_captcha, budget=budget)
+            if _captcha_blocks(captcha_result, html):
+                state = "blocked"
+        if state == "blocked":
+            log.warning("Page %d is a block page (HTTP %s) — recorded as failed, not empty.", n, status)
+            flags.blocked = True
             failed_pages.append(n)
-            return None
+            if proxy_pool is not None and used_proxy is not None and status in (403, 429):
+                proxy_pool.report_failure(used_proxy, dead=True)
+            return None, used_proxy
+        if state == "not_found":
+            log.warning("Page %d answered HTTP %s — the address does not exist.", n, status)
+            flags.not_found = True
+            failed_pages.append(n)
+            return None, used_proxy
+        try:
+            listing = pp.parse_listing_page(html, requested_url=start_url)
+        except Exception as exc:  # noqa: BLE001
+            # An unexpected exception INSIDE parsing (a page that fetched fine
+            # but has a shape product_parser doesn't expect) must not crash
+            # the run and discard every page already collected — live-
+            # reproduced 2026-09-14 on a worker page. One bad page degrades
+            # the run to partial, like a page that failed to fetch.
+            log.error("Page %d fetched OK but failed to parse — treating as failed, not crashing: %s", n, exc)
+            flags.parser_failed = True
+            failed_pages.append(n)
+            return None, used_proxy
+        if listing.parser_failed:
+            if pp.has_challenge_marker(html):
+                log.warning("Page %d is a Cloudflare interstitial — recorded as blocked.", n)
+                flags.blocked = True
+            else:
+                log.error("Page %d was served but no rows could be read (data block found: %s, "
+                          "rows the page reports: %s) — a parser failure, not an empty listing.",
+                          n, listing.data_found, listing.total)
+                flags.parser_failed = True
+            failed_pages.append(n)
+            return None, used_proxy
+        return listing, used_proxy
 
     # Page 1 is always fetched alone — its content decides whether later
     # pages can be addressed independently (their own ?page=N convention).
-    html, proxy = await fetch_page(1, page, proxy)
+    listing, proxy = await fetch_page(1, page, proxy)
     seen_skus: set = set()
-    if html is not None:
-        listing = safe_parse(1, html)
-        if listing is not None:
-            pages_products.append(listing.products)
-            seen_skus.update(_sku_key(p) for p in listing.products)
-            reported_page_count = listing.page_count
-            if not listing.products and listing.page is None:
-                # __NEXT_DATA__ / getDiscoveryData was entirely absent — treat
-                # as a possible block rather than silently reporting "empty",
-                # but only if a real challenge marker is present (see
-                # product_parser.BOT_CHALLENGE_MARKERS on why the ambient
-                # Cloudflare script tag alone does NOT count).
-                if detect_from_html(html, pp.BOT_CHALLENGE_MARKERS) or detect_from_html(html, pp.BOT_SITE_GUARD_MARKERS):
-                    blocked = True
+    reported_page_count: Optional[int] = None
+    if listing is not None:
+        pages_products.append(listing.products)
+        seen_skus.update(_sku_key(p) for p in listing.products)
+        reported_page_count = listing.page_count
 
     total_pages = args.pages
-    if reported_page_count is not None:
-        total_pages = min(total_pages, reported_page_count)
+    if reported_page_count is not None and reported_page_count < total_pages:
+        total_pages = reported_page_count
+        flags.stop_reason = "site_last_page"
+    else:
+        flags.stop_reason = "requested_pages_done"
 
-    remaining = list(range(2, total_pages + 1))
+    # Nothing more to fetch when page 1 itself did not complete.
+    remaining = list(range(2, total_pages + 1)) if listing is not None else []
     if remaining and args.concurrency <= 1:
         for n in remaining:
             if args.proxy_rotate and proxy_pool is not None:
@@ -343,15 +355,13 @@ async def scrape_listing(
                 context = await _new_context(browser, proxy)
                 page = await context.new_page()
             await asyncio.sleep(args.delay)
-            html, proxy = await fetch_page(n, page, proxy)
-            if html is None:
-                continue
-            listing = safe_parse(n, html)
+            listing, proxy = await fetch_page(n, page, proxy)
             if listing is None:
                 continue
             pages_products.append(listing.products)
             page_skus = {_sku_key(p) for p in listing.products}
             if page_skus <= seen_skus:
+                flags.stop_reason = "no_new_rows"
                 break  # data-based termination: this page added no NEW sku
             seen_skus |= page_skus
     elif remaining:
@@ -364,59 +374,72 @@ async def scrape_listing(
                 worker_ctx = await _new_context(browser, worker_proxy)
                 worker_page = await worker_ctx.new_page()
                 await asyncio.sleep(args.delay * (worker_index % max(1, args.concurrency)))
-                html, _ = await fetch_page(n, worker_page, worker_proxy)
+                worker_listing, _ = await fetch_page(n, worker_page, worker_proxy)
                 await worker_ctx.close()
-                if html is not None:
-                    listing = safe_parse(n, html)
-                    if listing is not None:
-                        results[n] = listing.products
+                if worker_listing is not None:
+                    results[n] = worker_listing.products
 
         await asyncio.gather(*(worker(n, i) for i, n in enumerate(remaining)))
         for n in sorted(results):  # merge in PAGE order, not arrival order
             pages_products.append(results[n])
 
     await context.close()
-    return pages_products, failed_pages, blocked, remote_api_error, reported_page_count, None
+    return pages_products, failed_pages, flags
 
 
 async def scrape_single_product(
     *, args: argparse.Namespace, url: str, browser: Browser,
     proxy_pool: Optional[ProxyPool], client: Optional[TwoCaptchaClient], autosolve: bool = False,
-) -> Tuple[List[Product], bool, bool]:
+) -> Tuple[List[Product], List[int], RunFlags]:
+    """Returns (products, failed_pages, flags) — the same shape as a
+    one-page listing, so run() treats both alike."""
+    flags = RunFlags(stop_reason="single_product")
     proxy = proxy_pool.next() if proxy_pool else None
     log.info("Using proxy %s", proxy.masked() if proxy else "(no local proxy pool — direct connection, or a --cdp-endpoint session providing its own exit)")
     context = await _new_context(browser, proxy)
     page = await context.new_page()
     if autosolve:
         await _enable_scraping_browser_auto_solve(context, page)
+    budget = SolveBudget()
     html, _, status, error = await _fetch(
         page, url, retries=args.retries, retry_delay=args.retry_delay,
         proxy_pool=proxy_pool, current_proxy=proxy,
     )
-    blocked = False
     if html is None:
         await context.close()
         log.error("Single-product fetch failed: %s", error)
-        return [], False, True
-    if status is not None and status >= 400:
-        log.warning("Product page returned HTTP %d — treating as blocked, not empty.", status)
-        blocked = True
-        if proxy_pool is not None and proxy is not None and status in (403, 429):
-            proxy_pool.report_failure(proxy, dead=True)
-    elif status is not None and proxy_pool is not None and proxy is not None:
-        proxy_pool.report_success(proxy)
+        return [], [1], flags
     if args.dump_html:
         Path(_dump_path(args.out, 1)).write_text(html, encoding="utf-8")
-    if detect_from_html(html, pp.APP_ERROR_MARKERS) or detect_from_html(html, pp.BOT_SITE_GUARD_MARKERS):
-        blocked = True
-    await _maybe_solve_captcha(html=html, url=url, client=client, policy=args.solve_captcha)
-    product = pp.parse_product_detail(html, requested_url=url)
+    state = pp.classify_served_page(html, status)
+    if state == "ok":
+        if status is not None and proxy_pool is not None and proxy is not None:
+            proxy_pool.report_success(proxy)
+        captcha_result = await _maybe_solve_captcha(
+            html=html, url=url, client=client, policy=args.solve_captcha, budget=budget)
+        if _captcha_blocks(captcha_result, html):
+            state = "blocked"
     await context.close()
+    if state == "blocked":
+        log.warning("Product page is a block page (HTTP %s) — treating as blocked, not empty.", status)
+        flags.blocked = True
+        if proxy_pool is not None and proxy is not None and status in (403, 429):
+            proxy_pool.report_failure(proxy, dead=True)
+        return [], [1], flags
+    if state == "not_found":
+        log.warning("Product page answered HTTP %s — no such product at %s.", status, url)
+        flags.not_found = True
+        return [], [1], flags
+    product = pp.parse_product_detail(html, requested_url=url)
     if product is None:
-        if pp.count_product_links(html) == 0:
-            blocked = True
-        return [], blocked, False
-    return [product], blocked, False
+        if pp.has_challenge_marker(html) or pp.count_product_links(html) == 0:
+            flags.blocked = True
+        else:
+            log.error("Product page was served but neither JSON-LD nor GetProduct could be read — "
+                      "a parser failure, not a missing product.")
+            flags.parser_failed = True
+        return [], [1], flags
+    return [product], [], flags
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -474,22 +497,19 @@ async def run(args: argparse.Namespace) -> int:
             autosolve = bool(args.cdp_endpoint) and args.solve_captcha != "off"
             single_mode = pp.is_single_product_url(start_url) and not pp.is_listing_url(start_url)
             if single_mode:
-                products, blocked, remote_api_error = await scrape_single_product(
+                merged, failed_pages, flags = await scrape_single_product(
                     args=args, url=start_url, browser=browser, proxy_pool=proxy_pool, client=client,
                     autosolve=autosolve,
                 )
-                pages_completed = 1 if products or not blocked else 0
-                failed_pages = [] if products or blocked else [1]
-                merged = products
-                price_confirmed_pct = (sum(1 for p in merged if p.price is not None) / len(merged)) if merged else None
+                pages_completed = 0 if failed_pages else 1
             else:
-                pages_products, failed_pages, blocked, remote_api_error, reported_page_count, _ = await scrape_listing(
+                pages_products, failed_pages, flags = await scrape_listing(
                     args=args, start_url=start_url, browser=browser, proxy_pool=proxy_pool, client=client,
                     autosolve=autosolve,
                 )
                 merged = merge_pages(pages_products)
                 pages_completed = len(pages_products)
-                price_confirmed_pct = (sum(1 for p in merged if p.price is not None) / len(merged)) if merged else None
+            price_confirmed_pct = (sum(1 for p in merged if p.price is not None) / len(merged)) if merged else None
 
             await browser.close()
     except Exception:
@@ -505,8 +525,11 @@ async def run(args: argparse.Namespace) -> int:
         pages_requested=args.pages,
         pages_completed=pages_completed,
         failed_pages=failed_pages,
-        blocked=blocked,
-        remote_api_error=remote_api_error,
+        blocked=flags.blocked,
+        remote_api_error=flags.remote_api_error,
+        not_found=flags.not_found,
+        parser_failed=flags.parser_failed,
+        stop_reason=flags.stop_reason,
         allow_empty=args.allow_empty,
         started_at=started_at,
         price_confirmed_pct=price_confirmed_pct,
@@ -517,6 +540,8 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     parser = build_arg_parser()
     args = parser.parse_args()
+    if args.url and args.category:
+        parser.error("--url and --category both name the start page; pass one of them")
     args = env_config.apply_env(args)
     try:
         return asyncio.run(run(args))

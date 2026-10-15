@@ -155,12 +155,14 @@ git push --tags
 
 Then, in the GitHub repo's Settings:
 
-- **Secrets and variables → Actions**: add `TWOCAPTCHA_KEY`, `STOCKX_PROXY`
-  (only if you want the canary using it), and `CLAUDE_CODE_OAUTH_TOKEN` (for
+- **Secrets and variables → Actions**: add `STOCKX_CDP_ENDPOINT` (the
+  canary's only live path — without it the canary fails on purpose, naming
+  the secret), and `CLAUDE_CODE_OAUTH_TOKEN` (for
   `claude.yml` / `claude-code-review.yml` — both silently no-op without it,
   by design, rather than failing every PR check).
 - **About** (gear icon next to the repo description): description, topics,
-  homepage — see `CLAUDE.md` §2 for the exact pattern; nothing in this repo
+  homepage (a one-sentence description naming the site, the engines and
+  the output; topics for the site and the engines); nothing in this repo
   can set these for you, they're GitHub-side settings, not files.
 - **Actions → canary → Run workflow**: dispatch it manually at least once
   (it has `workflow_dispatch` for exactly this) rather than waiting a day
