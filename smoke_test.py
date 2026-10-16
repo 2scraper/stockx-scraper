@@ -1752,8 +1752,10 @@ def _():
         else:
             os.environ["TWOCAPTCHA_KEY"] = saved
     assert ns.twocaptcha_key == secret, "TWOCAPTCHA_KEY no longer reaches the balance check"
-    testing = (ROOT / "TESTING.md").read_text(encoding="utf-8")
-    assert "get_balance()" in testing and "env_config.apply_env(args)" in testing, "TESTING.md balance check changed shape"
+    testing_md = ROOT / "TESTING.md"
+    if testing_md.exists():   # not copied into the Docker image
+        testing = testing_md.read_text(encoding="utf-8")
+        assert "get_balance()" in testing and "env_config.apply_env(args)" in testing, "TESTING.md balance check changed shape"
 
 
 @check("selenium: --proxy-rotate gives each sequential page a fresh browser on the next exit")
