@@ -346,7 +346,7 @@ driver import behind a module-level `try/except ImportError`, and
 import inside the launch path would let the module "pass" without ever
 proving the guard works).
 
-**Canary**: `canary.yml` runs daily through the Scraping Browser API and
+**Canary**: `canary.yml` runs weekly (Mondays) through the Scraping Browser API and
 needs the `STOCKX_CDP_ENDPOINT` repository secret. Without it the canary
 **fails** with an error naming the secret, rather than skipping green: a
 skipped canary has not tested the site. It also fails on exit 3/4/5/6,
