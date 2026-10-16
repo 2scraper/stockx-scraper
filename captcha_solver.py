@@ -95,6 +95,23 @@ def _refuse_flag(flag: str):
     return _type
 
 
+# The engines make no 2Captcha API call at all (no solve is bought, see
+# above, and no Fingerprint API flag is wired up), so a key typed here could
+# only change nothing. Its destination is deliberately not `twocaptcha_key`:
+# env_config fills only destinations the parser defines, so TWOCAPTCHA_KEY
+# from .env or the environment is never loaded by an engine either.
+TWOCAPTCHA_KEY_REASON = (
+    "the engines in this repository make no 2Captcha API call and buy no "
+    "captcha solves, so a key would change nothing; remove it from the "
+    "command line"
+)
+
+
+def _refuse_twocaptcha_key(value: str):
+    # Never echo the value: it may be a real key.
+    raise argparse.ArgumentTypeError(f"not used: {TWOCAPTCHA_KEY_REASON}")
+
+
 def _solve_captcha_policy(value: str) -> str:
     if value == "always":
         raise argparse.ArgumentTypeError(
@@ -116,6 +133,10 @@ def add_captcha_arguments(p: argparse.ArgumentParser) -> None:
                    help="Not implemented: refused with exit 2")
     p.add_argument("--min-score", type=_refuse_flag("--min-score"), default=None,
                    help="Not implemented: refused with exit 2")
+    p.add_argument("--twocaptcha-key", dest="refused_twocaptcha_key", type=_refuse_twocaptcha_key,
+                   default=None, metavar="KEY",
+                   help="Refused with exit 2: the engines make no 2Captcha API call, so a key "
+                        "changes nothing (TWOCAPTCHA_KEY is not read by the engines either)")
 
 
 class SolveBudget:

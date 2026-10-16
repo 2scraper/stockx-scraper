@@ -112,7 +112,7 @@ places they genuinely can't behave the same as Playwright.
 
 `--url --category --pages --format --out --delay --retries --retry-delay
 --concurrency --proxy --proxy-file --proxy-rotate --proxy-shuffle
---proxy-block-retries --twocaptcha-key --solve-captcha {off,when-blocked}
+--proxy-block-retries --solve-captcha {off,when-blocked}
 --cdp-endpoint --allow-empty --dump-html --headless/--headful`
 
 `--captcha-api`, `--min-score` and `--solve-captcha always` are refused with
@@ -120,8 +120,14 @@ exit 2: this repository does not implement captcha-token injection, so they
 could only change nothing (see "Known limitations"). They are still parsed so
 that an old command line fails loudly instead of running as if they worked.
 
-Credentials belong in `.env` / `STOCKX_PROXY` / `TWOCAPTCHA_KEY` — never as
-literal `--proxy`/`--twocaptcha-key` text on a shared or logged command
+`--twocaptcha-key` is refused with exit 2 for the same reason: no engine
+makes a 2Captcha API call (no solve is bought and no Fingerprint API flag is
+wired up), so a key could only change nothing. The engines do not read
+`TWOCAPTCHA_KEY` from `.env` or the environment either. That variable is used
+only by the balance check in `TESTING.md`.
+
+Credentials belong in `.env` / `STOCKX_PROXY` / `STOCKX_CDP_ENDPOINT` — never
+as literal `--proxy`/`--cdp-endpoint` text on a shared or logged command
 line if you can avoid it.
 
 ## Output contract
@@ -228,8 +234,8 @@ three agree on exit codes and the `Product` schema via the shared
   passes `can_use_token=True` and no `createTask` is ever sent — a token
   nothing injects cannot change the outcome, it only costs money. Should
   injection be added, every purchase goes through a per-page `SolveBudget`
-  claimed before the purchase. `--twocaptcha-key` is still accepted, but
-  the engines send nothing with it today. `--captcha-api`,
+  claimed before the purchase. `--twocaptcha-key` is refused with exit 2,
+  and the engines do not read `TWOCAPTCHA_KEY`. `--captcha-api`,
   `--min-score` and `--solve-captcha always` used to be accepted and change
   nothing; they are now refused with exit 2 and a message saying so. Over
   `--cdp-endpoint` (the Scraping Browser API), this doesn't matter:

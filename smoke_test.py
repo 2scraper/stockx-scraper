@@ -1261,7 +1261,10 @@ def _():
     sets = {name: cli_flags(name) for name in _ENGINE_NAMES}
     assert all(sets.values()), f"no flags found in {[k for k, v in sets.items() if not v]}"
     shared = set.intersection(*sets.values())
-    assert len(shared) >= 20, f"only {len(shared)} shared flags — did the extractor stop matching?"
+    # The captcha flags (--solve-captcha, --captcha-api, --min-score,
+    # --twocaptcha-key) come from captcha_solver.add_captcha_arguments, one
+    # definition shared by every engine, so this literal count excludes them.
+    assert len(shared) >= 19, f"only {len(shared)} shared flags — did the extractor stop matching?"
 
     for name, flags in sets.items():
         undocumented = sorted(flags - shared - set(ENGINE_SPECIFIC.get(name, ())))
@@ -1384,6 +1387,7 @@ class _CountingClient:
     """Stands in for TwoCaptchaClient; counts purchases. Never on the network."""
     def __init__(self, raise_exc=None):
         self.purchases = 0
+        self.constructed = 0
         self.raise_exc = raise_exc
 
     def solve_and_wait(self, task):
@@ -1563,13 +1567,24 @@ def _engine_run(engine, argv, route, *, captcha_client=None):
         patch(engine, "_build_driver", _se_build)
         patch(engine, "READINESS_WAIT_S", 0)
     if captcha_client is not None:
-        patch(engine, "TwoCaptchaClient", lambda key: captcha_client)
-        argv = argv + ["--twocaptcha-key", "stub-not-a-key"]
+        # A key is configured the way a user would (TWOCAPTCHA_KEY, applied
+        # by env_config as main() does); the engine must neither load it
+        # nor build a client from it.
+        def _client_factory(key):
+            captcha_client.constructed += 1
+            return captcha_client
+        patch(engine, "TwoCaptchaClient", _client_factory)
+    saved_key = os.environ.get("TWOCAPTCHA_KEY")
     try:
         with tempfile.TemporaryDirectory() as d:
             out = str(Path(d) / "out.json")
             args = engine.build_arg_parser().parse_args(
                 argv + ["--out", out, "--delay", "0", "--retry-delay", "0"])
+            if captcha_client is not None:
+                os.environ["TWOCAPTCHA_KEY"] = "stub-not-a-key"
+                args = env_config.apply_env(args, dotenv_path=str(Path(d) / "no.env"))
+                assert "stub-not-a-key" not in vars(args).values(), (
+                    f"{engine.__name__}: TWOCAPTCHA_KEY was loaded into the engine's args")
             result = engine.run(args)
             if asyncio.iscoroutine(result):
                 result = asyncio.run(result)
@@ -1577,6 +1592,10 @@ def _engine_run(engine, argv, route, *, captcha_client=None):
             meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else None
             return result, meta, len(navs)
     finally:
+        if saved_key is None:
+            os.environ.pop("TWOCAPTCHA_KEY", None)
+        else:
+            os.environ["TWOCAPTCHA_KEY"] = saved_key
         for obj, name, value in reversed(patches):
             setattr(obj, name, value)
 
@@ -1649,6 +1668,7 @@ def _():
             code, _, _ = _engine_run(engine, argv, lambda url: (200, _CAPTCHA_PAGE), captcha_client=client)
             assert code == output_writer.EXIT_BLOCKED, f"{engine.__name__} {argv[1]}: exit {code}"
             assert client.purchases == 0, f"{engine.__name__}: {client.purchases} solve(s) bought for a token nothing injects"
+            assert client.constructed == 0, f"{engine.__name__}: built a 2Captcha client although no engine path uses one"
 
 
 @check("every engine: --retries 0 is one navigation; negative counts and zero pages are refused with exit 2")
@@ -1697,6 +1717,45 @@ def _():
             assert parsed(["--solve-captcha", policy]).solve_captcha == policy, (engine.__name__, policy)
         code, _, _ = _engine_run(engine, _PRODUCT + ["--solve-captcha", "off"], lambda url: (200, _PRODUCT_HTML))
         assert code == 0, f"{engine.__name__}: --solve-captcha off gave exit {code}"
+
+
+@check("every engine: --twocaptcha-key is refused with exit 2 (no engine uses a key); TWOCAPTCHA_KEY still reaches the balance check")
+def _():
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+    secret = "k3y" + "x" * 29
+    for engine in _ENGINES:
+        parser = engine.build_arg_parser()
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                parser.parse_args(_CATEGORY + ["--twocaptcha-key", secret])
+                raise AssertionError(f"{engine.__name__} accepted --twocaptcha-key although no engine path uses it")
+            except SystemExit as exc:
+                assert exc.code == 2, (engine.__name__, exc.code)
+        text = err.getvalue()
+        assert "--twocaptcha-key" in text and "make no 2Captcha API call" in text, (engine.__name__, text)
+        assert secret not in text, f"{engine.__name__}: the refusal echoed the key"
+        assert "TWOCAPTCHA_KEY" not in (parser.epilog or ""), f"{engine.__name__}: --help still lists TWOCAPTCHA_KEY as a credential it uses"
+    # The balance check in TESTING.md builds its own namespace with a
+    # twocaptcha_key slot; env_config must still fill that one.
+    saved = os.environ.get("TWOCAPTCHA_KEY")
+    os.environ["TWOCAPTCHA_KEY"] = secret
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            ns = argparse.Namespace(twocaptcha_key=None, proxy=None, cdp_endpoint=None, url=None)
+            env_config.apply_env(ns, dotenv_path=str(Path(d) / "no.env"))
+    finally:
+        if saved is None:
+            os.environ.pop("TWOCAPTCHA_KEY", None)
+        else:
+            os.environ["TWOCAPTCHA_KEY"] = saved
+    assert ns.twocaptcha_key == secret, "TWOCAPTCHA_KEY no longer reaches the balance check"
+    testing_md = ROOT / "TESTING.md"
+    if testing_md.exists():   # not copied into the Docker image
+        testing = testing_md.read_text(encoding="utf-8")
+        assert "get_balance()" in testing and "env_config.apply_env(args)" in testing, "TESTING.md balance check changed shape"
 
 
 @check("selenium: --proxy-rotate gives each sequential page a fresh browser on the next exit")
