@@ -22,6 +22,9 @@ rather than being a silent violation of that.
   so the three engines cannot drift apart; `--help` marks the refused flags.
 - An offline check runs each engine's parser against each refused flag and
   confirms that `off` and `when-blocked` still parse and run.
+- CI only: the canary bills a Scraping Browser session (`STOCKX_CDP_ENDPOINT`),
+  so it now runs weekly (Mondays 06:17 UTC) instead of daily; a manual dispatch
+  still runs it.
 
 ## [1.1.0] — 2026-10-15
 
