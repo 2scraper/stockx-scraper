@@ -84,7 +84,7 @@ def _nonnegative_float(value: str) -> float:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="stockx.com listing/product scraper — Playwright engine",
-        epilog="Credentials belong in .env / STOCKX_PROXY / TWOCAPTCHA_KEY — never on this command line.",
+        epilog="Credentials belong in .env / STOCKX_PROXY / STOCKX_CDP_ENDPOINT — never on this command line.",
     )
     p.add_argument("--url", default=None, help="Full stockx.com URL (search, /category/*, /browse/*, or a single product page)")
     p.add_argument("--category", default=None, help="Shortcut: a known category/demographic slug, e.g. 'sneakers' or 'men'")
@@ -100,7 +100,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--proxy-rotate", action="store_true", help="Use a fresh proxy (and a fresh browser context) for every page")
     p.add_argument("--proxy-shuffle", action="store_true")
     p.add_argument("--proxy-block-retries", type=_nonnegative_int, default=3)
-    p.add_argument("--twocaptcha-key", default=None, help="(or set TWOCAPTCHA_KEY)")
     add_captcha_arguments(p)
     p.add_argument("--cdp-endpoint", default=None, help="Connect to a remote CDP session (e.g. the 2Captcha Scraping Browser API) instead of launching locally (or set STOCKX_CDP_ENDPOINT)")
     p.add_argument("--allow-empty", action="store_true", help="Write output even if zero products were found")
@@ -475,9 +474,10 @@ async def run(args: argparse.Namespace) -> int:
             "Continuing anyway (this is a warning, not a refusal).", args.concurrency,
         )
 
+    # No engine buys a solve (none injects a token), so no 2Captcha client
+    # is built: --twocaptcha-key is refused at parse time and TWOCAPTCHA_KEY
+    # is not loaded (see captcha_solver.add_captcha_arguments).
     client = None
-    if args.twocaptcha_key and args.solve_captcha != "off":
-        client = TwoCaptchaClient(args.twocaptcha_key)
 
     cdp_refused_extras = refuse_if_cdp(args.cdp_endpoint)  # just logs; nothing to refuse here (no --fingerprint flag wired up)
     del cdp_refused_extras

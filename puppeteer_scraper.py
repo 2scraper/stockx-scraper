@@ -92,7 +92,7 @@ def _nonnegative_float(value: str) -> float:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="stockx.com listing/product scraper — pyppeteer (Puppeteer) engine",
-        epilog="Credentials belong in .env / STOCKX_PROXY / TWOCAPTCHA_KEY — never on this command line.",
+        epilog="Credentials belong in .env / STOCKX_PROXY / STOCKX_CDP_ENDPOINT — never on this command line.",
     )
     p.add_argument("--url", default=None)
     p.add_argument("--category", default=None)
@@ -108,7 +108,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--proxy-rotate", action="store_true")
     p.add_argument("--proxy-shuffle", action="store_true")
     p.add_argument("--proxy-block-retries", type=_nonnegative_int, default=3)
-    p.add_argument("--twocaptcha-key", default=None)
     add_captcha_arguments(p)
     p.add_argument("--cdp-endpoint", default=None)
     p.add_argument("--allow-empty", action="store_true")
@@ -463,7 +462,10 @@ async def run(args: argparse.Namespace) -> int:
         log.warning("Ignoring --proxy: a --cdp-endpoint session already carries its own exit IP.")
         proxy_pool = None
 
-    client = TwoCaptchaClient(args.twocaptcha_key) if (args.twocaptcha_key and args.solve_captcha != "off") else None
+    # No engine buys a solve (none injects a token), so no 2Captcha client
+    # is built: --twocaptcha-key is refused at parse time and TWOCAPTCHA_KEY
+    # is not loaded (see captcha_solver.add_captcha_arguments).
+    client = None
     autosolve = bool(args.cdp_endpoint) and args.solve_captcha != "off"
 
     try:

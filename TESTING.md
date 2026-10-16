@@ -21,7 +21,8 @@ playwright install chromium
 cp .env.example .env
 ```
 
-Open `.env` and fill in the values you already have — `TWOCAPTCHA_KEY`,
+Open `.env` and fill in the values you already have — `TWOCAPTCHA_KEY`
+(used only by the balance check in section 5; the engines do not read it),
 and `STOCKX_PROXY` / `STOCKX_CDP_ENDPOINT` if you want to test those too.
 Leave a line blank/absent rather than half-filled — `env_config.py` treats
 an empty value as "not set", never as a literal empty credential.

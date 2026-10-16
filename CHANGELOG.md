@@ -16,12 +16,24 @@ rather than being a silent violation of that.
 > a solve. The error names the flag and says that this repository does not
 > implement captcha-token injection. `--solve-captcha` now accepts
 > `when-blocked` (the default) and `off`; their behaviour is unchanged.
+>
+> **Behaviour change.** `--twocaptcha-key` is refused with exit 2 in every
+> engine. No engine makes a 2Captcha API call: no solve is bought and no
+> Fingerprint API flag is wired up, so the key was accepted and never used.
+> The error names the flag and never echoes the value. The engines no longer
+> read `TWOCAPTCHA_KEY` from `.env` or the environment either. The balance
+> check in `TESTING.md` still reads it.
 
 ### Changed
 - The captcha flags are defined once, in `captcha_solver.add_captcha_arguments`,
   so the three engines cannot drift apart; `--help` marks the refused flags.
 - An offline check runs each engine's parser against each refused flag and
   confirms that `off` and `when-blocked` still parse and run.
+- An offline check refuses `--twocaptcha-key` in each engine, sets
+  `TWOCAPTCHA_KEY` and confirms that no engine loads it or builds a 2Captcha
+  client, and confirms that the balance check's namespace still receives it.
+  `--help`, README, `.env.example`, `SECURITY.md` and `TESTING.md` say the
+  same thing.
 
 ## [1.1.0] — 2026-10-15
 
