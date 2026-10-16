@@ -9,6 +9,8 @@ rather than being a silent violation of that.
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-10-16
+
 > **Behaviour change.** `--captcha-api`, `--min-score` and
 > `--solve-captcha always` are refused with exit 2 in every engine
 > (Playwright, Selenium, pyppeteer). No engine injects a solved captcha token
