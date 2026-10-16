@@ -34,6 +34,9 @@ rather than being a silent violation of that.
   client, and confirms that the balance check's namespace still receives it.
   `--help`, README, `.env.example`, `SECURITY.md` and `TESTING.md` say the
   same thing.
+- CI only: the canary bills a Scraping Browser session (`STOCKX_CDP_ENDPOINT`),
+  so it now runs weekly (Mondays 06:17 UTC) instead of daily; a manual dispatch
+  still runs it.
 
 ## [1.1.0] — 2026-10-15
 
