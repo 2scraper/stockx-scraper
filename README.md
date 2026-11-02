@@ -1,4 +1,4 @@
-# stockx-scraper
+# StockX Scraper — Lowest Ask, Highest Bid and Last Sale in Python
 
 ![release](https://img.shields.io/github/v/release/2scraper/stockx-scraper?sort=semver)
 ![tests](https://github.com/2scraper/stockx-scraper/actions/workflows/tests.yml/badge.svg)
@@ -7,6 +7,8 @@
 ![licence](https://img.shields.io/badge/licence-MIT-green)
 ![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)
 ![runs without an account](https://img.shields.io/badge/runs%20without%20an%20account-yes-success)
+
+**StockX scraper** — an open-source (MIT) Python tool that reads stockx.com search results, category listings and product pages and writes lowest ask, highest bid, last sale, retail price and release date to JSON or CSV. On 2026-09-10 an ordinary headless Chromium with no proxy, key or account returned full data, but on 2026-09-13/14 direct and residential-proxy runs got a fast HTTP 403 and only a Scraping Browser API (`--cdp-endpoint`) session got through — though timeouts and a hard Cloudflare block have also been seen over it, and access has not been re-measured since 2026-09-14. Use it to build a resale price dataset, or compare two runs with `diff_runs.py`.
 
 StockX listing-page scraper: search results, category/browse listings, and
 single product pages. Three engines (Playwright primary, Selenium and
@@ -364,6 +366,23 @@ repo's own build environment could not verify (outbound access to
 stockx.com was blocked there): the free path against the real site, each
 engine for real, the 2Captcha REST API and Scraping Browser API with a
 live key, and the residential proxy.
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [TikTok Shop scraper](https://github.com/2scraper/tiktok-shop-scraper) — Product pages to 39 columns
+- [Tokopedia scraper](https://github.com/2scraper/tokopedia-scraper) — IDR prices, discounts, ratings, sold counts and shops…
+- [Tractor Supply scraper](https://github.com/2scraper/tractorsupply-scraper) — Categories, departments and searches
+- [Woolworths scraper](https://github.com/2scraper/woolworths-scraper) — Prices, unit prices, specials, health star ratings…
+- [Amazon scraper](https://github.com/2scraper/amazon-scraper) — Search results, best-seller grids, product pages and reviews…
+- [Andie Swim scraper](https://github.com/2scraper/andieswim-scraper) — Collections, keyword lookups and per-size stock…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
 
 ## License
 
