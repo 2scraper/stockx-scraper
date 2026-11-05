@@ -9,6 +9,16 @@ rather than being a silent violation of that.
 
 ## [Unreleased]
 
+### Changed
+- README: one dated statement of access. On 2026-11-05 a direct Playwright
+  run from a datacentre host got HTTP 403 (exit 3) and a Scraping Browser
+  API session (US exit) returned a complete category page (45 products,
+  all priced). The undated "not re-measured" and "still not possible"
+  wording is replaced; the canary schedule now states its UTC time.
+- The canary had failed since 2026-10-15 only because the
+  `STOCKX_CDP_ENDPOINT` repository secret was not set; it is now set and the
+  canary runs the live check.
+
 ## [1.1.1] — 2026-10-16
 
 > **Behaviour change.** `--captcha-api`, `--min-score` and

@@ -8,7 +8,7 @@
 ![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)
 ![runs without an account](https://img.shields.io/badge/runs%20without%20an%20account-yes-success)
 
-**StockX scraper** — an open-source (MIT) Python tool that reads stockx.com search results, category listings and product pages and writes lowest ask, highest bid, last sale, retail price and release date to JSON or CSV. On 2026-09-10 an ordinary headless Chromium with no proxy, key or account returned full data, but on 2026-09-13/14 direct and residential-proxy runs got a fast HTTP 403 and only a Scraping Browser API (`--cdp-endpoint`) session got through — though timeouts and a hard Cloudflare block have also been seen over it, and access has not been re-measured since 2026-09-14. Use it to build a resale price dataset, or compare two runs with `diff_runs.py`.
+**StockX scraper** — an open-source (MIT) Python tool that reads stockx.com search results, category listings and product pages and writes lowest ask, highest bid, last sale, retail price and release date to JSON or CSV. On 2026-11-05 a plain headless Chromium with no proxy got HTTP 403 from a datacentre host, while a Scraping Browser API (`--cdp-endpoint`, US exit) session returned a full category page with every row priced. Access has changed before (a free direct run worked on 2026-09-10; timeouts and a hard Cloudflare block were seen over the Scraping Browser API on 2026-09-13/14), so read the exit code. Use it to build a resale price dataset, or compare two runs with `diff_runs.py`.
 
 StockX listing-page scraper: search results, category/browse listings, and
 single product pages. Three engines (Playwright primary, Selenium and
@@ -18,15 +18,19 @@ Puppeteer/pyppeteer for parity), JSON or CSV output, an open, documented
 ## What was actually measured
 
 Live captures against stockx.com, 2026-09-10, unless a bullet says
-otherwise. Access has not been re-measured since 2026-09-14.
+otherwise. Access was last measured on 2026-11-05 (first bullet).
 
 - **On 2026-09-10, an ordinary headless Chromium, no proxy, no 2Captcha
   key, no account, cleared stockx.com's Cloudflare bot-management scripts**
   and returned full search/category/product data on every page requested.
   **On 2026-09-13/14 that changed**: direct and residential-proxy runs got a
   fast HTTP 403, and only a Scraping Browser API (`--cdp-endpoint`) session
-  got through (see "Known limitations"). Try the free path first and read
-  the exit code — `3` means stockx.com refused this client.
+  got through (see "Known limitations"). **On 2026-11-05**, one page of
+  `--category sneakers` each way: Playwright with no proxy from a
+  datacentre host got HTTP 403 (exit 3); Playwright through the Scraping
+  Browser API (`--cdp-endpoint`, US exit) returned `status: complete`, 45
+  products, all 45 with a USD lowest ask (exit 0). Try the free path first
+  and read the exit code — `3` means stockx.com refused this client.
 - **Search and category listing pages carry exactly one JSON-LD block**
   (`BreadcrumbList` — zero products in it). The real data source is
   stockx.com's own embedded Next.js payload: a `__NEXT_DATA__` script tag
@@ -250,9 +254,11 @@ three agree on exit codes and the `Product` schema via the shared
   SSR payload doesn't carry them (they render client-side after mount);
   scrape the product's category/search listing instead if you need them
   alongside a specific product.
-- **A live run against stockx.com from this project's own dev sandbox is
-  still not possible** (outbound access to `stockx.com` is refused there),
-  but a user's own machine has run the full sequence for real. Results
+- **A live run against stockx.com was not possible from the original
+  development sandbox** (outbound access to `stockx.com` was refused
+  there); the observations below come from a user's own machine
+  (2026-09-13/14), and the 2026-11-05 measurement in "What was actually
+  measured" from a datacentre host. Results
   vary by path and exit, so read all of the following as "this is what a
   clean run can look like" and "this is a real failure mode to expect",
   not "this always works":
@@ -354,7 +360,7 @@ driver import behind a module-level `try/except ImportError`, and
 import inside the launch path would let the module "pass" without ever
 proving the guard works).
 
-**Canary**: `canary.yml` runs weekly (Mondays) through the Scraping Browser API and
+**Canary**: `canary.yml` runs weekly (Mondays, 06:17 UTC) through the Scraping Browser API and
 needs the `STOCKX_CDP_ENDPOINT` repository secret. Without it the canary
 **fails** with an error naming the secret, rather than skipping green: a
 skipped canary has not tested the site. It also fails on exit 3/4/5/6,
