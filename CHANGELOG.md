@@ -10,6 +10,8 @@ rather than being a silent violation of that.
 ## [Unreleased]
 
 ### Changed
+
+- CI only: the scheduled canary now starts at 05:07 UTC (Mondays) instead of 06:17, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
 - README: one dated statement of access. On 2026-11-05 a direct Playwright
   run from a datacentre host got HTTP 403 (exit 3) and a Scraping Browser
   API session (US exit) returned a complete category page (45 products,
